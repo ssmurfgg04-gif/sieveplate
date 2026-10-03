@@ -365,6 +365,9 @@ mod tests {
             .unwrap();
         assert_eq!(sig.source, "ebpf-lo");
         assert!(u64::from_le_bytes(sig.payload[..8].try_into().unwrap()) >= 4);
+        // Drop the receiver so the pump thread sees a closed channel and
+        // exits — otherwise join() waits forever.
+        drop(rx);
         let _ = worker.join();
     }
 }
