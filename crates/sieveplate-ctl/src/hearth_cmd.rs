@@ -43,8 +43,8 @@ pub fn snapshot(root: &str, branch: &str, entries: &[String], message: &str) -> 
     }
     let tree = h.snapshot(list)?;
     let commit = h.commit(branch, &tree, message)?;
-    println!("tree   {tree}");
-    println!("commit {commit}");
+    println!("tree\t{tree}");
+    println!("commit\t{commit}");
     Ok(())
 }
 
@@ -94,10 +94,10 @@ pub fn ddiff(root: &str, a: &str, b: &str) -> Result<()> {
     let (h, _s) = open(root)?;
     let (delta_hash, delta) = h.ddiff(a, b)?;
     let target_bytes = delta.copied_bytes();
-    println!("delta   {delta_hash}");
-    println!("ops     {}", delta.ops.len());
-    println!("copied  {target_bytes} bytes reused from base");
-    println!("carried {} bytes of literal payload", delta.carried_bytes());
+    println!("delta\t{delta_hash}");
+    println!("ops\t{}", delta.ops.len());
+    println!("copied\t{target_bytes}");
+    println!("carried\t{}", delta.carried_bytes());
     Ok(())
 }
 
@@ -105,7 +105,7 @@ pub fn ddiff(root: &str, a: &str, b: &str) -> Result<()> {
 pub fn apply_delta(root: &str, base: &str, delta_hash: &str) -> Result<()> {
     let (h, _s) = open(root)?;
     let rebuilt = h.apply_ddiff(base, delta_hash)?;
-    println!("rebuilt {rebuilt}");
+    println!("rebuilt\t{rebuilt}");
     Ok(())
 }
 

@@ -27,13 +27,13 @@ use libc::close;
 use std::os::raw::c_void;
 
 /// The kernel's `bpf_insn` (uapi/linux/bpf.h) — libc doesn't export it.
+/// Exactly 8 bytes: dst/src registers share ONE byte (dst low nibble,
+/// src high nibble). Getting this wrong = verifier reads garbage jumps.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct bpf_insn {
     pub code: u8,
-    /// destination register (4 bits) in the low nibble, source in bits 4-7
-    pub dst_reg: u8,
-    pub src_reg: u8,
+    pub regs: u8,
     pub off: i16,
     pub imm: i32,
 }
@@ -63,8 +63,7 @@ const BPF_EXIT: u8 = 0x90;
 pub const fn insn(code: u8, dst: u8, src: u8, off: i16, imm: i32) -> bpf_insn {
     bpf_insn {
         code,
-        dst_reg: dst & 0xf,
-        src_reg: src & 0xf,
+        regs: ((src & 0xf) << 4) | (dst & 0xf),
         off,
         imm,
     }
@@ -323,6 +322,10 @@ mod tests {
         assert_eq!(p.len(), 4);
         assert_eq!(p[1].code, BPF_LDX | BPF_MEM | BPF_W);
         assert_eq!(p[1].off, 0); // __sk_buff.len is at offset 0
+                                 // instruction encoding must be exactly 8 bytes (kernel ABI)
+        assert_eq!(std::mem::size_of::<bpf_insn>(), 8);
+        // regs byte: dst in low nibble, src in high nibble
+        assert_eq!(p[0].regs, (R1 << 4) | R6); // mov r6, r1
     }
 
     #[test]
