@@ -116,6 +116,8 @@ pub async fn run_file(file: &str, root: &str) -> Result<()> {
             host: spec.system.name.clone(),
             vats: dedup_vats(&spec),
             mailbox_capacity: 1024,
+            worker_exe: None,
+            drain_on_shutdown: true,
         },
         root,
     )?;
@@ -137,17 +139,32 @@ pub async fn run_file(file: &str, root: &str) -> Result<()> {
             sleep_after_ms: c.sleep_after_ms,
             persist_on_turn: c.persist_on_turn,
             max_restarts: c.max_restarts,
+            isolation: match c.isolation.as_deref() {
+                Some("process") => sieveplate_engine::Isolation::Process,
+                _ => sieveplate_engine::Isolation::Thread,
+            },
+            sandbox: c.sandbox.clone().unwrap_or_default(),
         };
         host.create_cell(&cs).await?;
         println!("✓ cell {}/{} <{}>", c.vat, c.name, c.template);
     }
 
-    // Network (Phase 4) if configured.
+    // Network (Phase 4) if configured. Links are always secured (SIEVE1:
+    // hybrid Ed25519+ML-DSA identity, X25519+ML-KEM-768 keys, AEAD frames).
     let mut network = None;
     if let Some(net) = &spec.network {
+        let link = {
+            let dir = std::path::Path::new(root).join("fabric");
+            let identity = sieveplate_fabric::HostIdentity::load_or_create(&dir, &host.host)?;
+            let peers = std::sync::Arc::new(sieveplate_fabric::KnownPeers::open(
+                dir.join("known_peers.json"),
+            )?);
+            sieveplate_fabric::LinkConfig::new(identity, peers)
+        };
         if let Some(listen) = &net.listen {
-            network = Some(sieveplate_fabric::serve(host.fabric.clone(), listen).await?);
-            println!("✓ listening on {listen}");
+            network =
+                Some(sieveplate_fabric::serve(host.fabric.clone(), listen, link.clone()).await?);
+            println!("✓ listening on {listen} (secure link)");
         }
         for peer in &net.peers {
             // peers are "alias=addr"
@@ -155,8 +172,8 @@ pub async fn run_file(file: &str, root: &str) -> Result<()> {
                 Some(x) => x,
                 None => return Err(anyhow!("peer '{peer}' must be alias=addr")),
             };
-            sieveplate_fabric::connect_peer(&host.fabric, alias, addr).await?;
-            println!("✓ peer {alias} @ {addr}");
+            sieveplate_fabric::connect_peer(&host.fabric, alias, addr, &link).await?;
+            println!("✓ peer {alias} @ {addr} (secure link)");
         }
     }
 

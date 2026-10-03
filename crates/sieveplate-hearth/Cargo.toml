@@ -1,0 +1,14 @@
+[package]
+name = "sieveplate-hearth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The Hearth layer: content-addressed versioning — snapshots, branches, logical diff (branch-level) and byte-level ddiff (snapshot-level)"
+
+[dependencies]
+sieveplate-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bincode.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

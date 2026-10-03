@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use sieveplate_core::Port;
-use sieveplate_engine::{CellSpec, Host, HostConfig};
+use sieveplate_engine::{CellSpec, Host, HostConfig, Isolation};
 
 fn counter_spec(sleep_after_ms: Option<u64>) -> CellSpec {
     CellSpec {
@@ -18,6 +18,8 @@ fn counter_spec(sleep_after_ms: Option<u64>) -> CellSpec {
         sleep_after_ms,
         persist_on_turn: true,
         max_restarts: 3,
+        isolation: Isolation::Thread,
+        sandbox: Default::default(),
     }
 }
 
@@ -36,6 +38,8 @@ async fn phase1_vertical_slice_success_criteria() {
             host: "vs".into(),
             vats: vec!["core".into()],
             mailbox_capacity: 1024,
+            worker_exe: None,
+            drain_on_shutdown: true,
         },
         &root,
     )
@@ -148,6 +152,8 @@ async fn capabilities_are_enforced() {
             host: "cap".into(),
             vats: vec!["core".into()],
             mailbox_capacity: 1024,
+            worker_exe: None,
+            drain_on_shutdown: true,
         },
         &root,
     )
@@ -163,6 +169,8 @@ async fn capabilities_are_enforced() {
         sleep_after_ms: None,
         persist_on_turn: false,
         max_restarts: 0,
+        isolation: Isolation::Thread,
+        sandbox: Default::default(),
     };
     host.create_cell(&caller).await.unwrap();
     host.create_cell(&counter_spec(None)).await.unwrap();

@@ -8,12 +8,83 @@
 
 use sieveplate_store::Hash;
 
+use crate::cap::CapTable;
 use crate::envelope::Envelope;
 use crate::error::CellError;
 use crate::port::Port;
 use crate::promise::{Continuation, Promises};
 use crate::route::Route;
 use std::sync::Arc;
+
+/// A standalone turn runner for cells executing OUTSIDE a vat — the
+/// process-cell worker path (`sieveplate-jail`). It owns everything a
+/// [`TurnCtx`] borrows, so a worker process can drive cell turns against a
+/// mediated route (every send/call flows through the parent process, where
+/// the capability table is re-checked and the OS sandbox bounds the
+/// process itself).
+pub struct TurnRunner {
+    outbox: Vec<Envelope>,
+    reply: Option<Vec<u8>>,
+    caps: CapTable,
+    fabric: Arc<dyn Route>,
+    promises: Arc<Promises>,
+    self_port: Port,
+}
+
+impl TurnRunner {
+    pub fn new(
+        self_port: Port,
+        caps: CapTable,
+        fabric: Arc<dyn Route>,
+        promises: Arc<Promises>,
+    ) -> Self {
+        TurnRunner {
+            outbox: Vec::new(),
+            reply: None,
+            caps,
+            fabric,
+            promises,
+            self_port,
+        }
+    }
+
+    /// Borrow the context for one handler invocation.
+    pub fn ctx(&mut self) -> TurnCtx<'_> {
+        TurnCtx {
+            outbox: &mut self.outbox,
+            reply: &mut self.reply,
+            caps: &self.caps,
+            fabric: Arc::clone(&self.fabric),
+            promises: Arc::clone(&self.promises),
+            self_port: self.self_port.clone(),
+        }
+    }
+
+    /// Re-point the runner at a cell port (workers host exactly one cell
+    /// per process but stay generic over which).
+    pub fn set_self_port(&mut self, port: Port) {
+        self.self_port = port;
+    }
+
+    /// Drain the outbox produced by the turn.
+    pub fn take_outbox(&mut self) -> Vec<Envelope> {
+        std::mem::take(&mut self.outbox)
+    }
+
+    /// Take the auto-reply payload (if the handler set one).
+    pub fn take_reply(&mut self) -> Option<Vec<u8>> {
+        self.reply.take()
+    }
+
+    /// The capability table this runner enforces.
+    pub fn caps(&self) -> &CapTable {
+        &self.caps
+    }
+
+    pub fn promises(&self) -> &Arc<Promises> {
+        &self.promises
+    }
+}
 
 /// A type-erased cell living in a vat.
 pub type BoxedCell = Box<dyn Cell + Send>;

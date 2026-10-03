@@ -10,12 +10,16 @@
 //!   blocking (the Pathways/Goblins pattern)
 
 pub mod error;
+pub mod identity;
 mod net;
 mod router;
+pub mod secure;
 
 pub use error::FabricError;
-pub use net::{connect_peer, frame, serve, unframe, Network};
+pub use identity::{fingerprint, HostIdentity, HostPublic, KnownPeers, PeerRecord};
+pub use net::{connect_peer, frame, serve, unframe, LinkConfig, Network};
 pub use router::Fabric;
+pub use secure::PROTOCOL;
 
 use sieveplate_core::{CellError, Port, PromiseId, Promises};
 

@@ -13,20 +13,31 @@
 //! Performance targets from the 2026 spec: cell creation/wake in the
 //! sub-millisecond range in-process; scale-to-zero < 10 ms.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
+use crate::proc_cell::ProcCellManager;
 use sieveplate_cells::builtin_registry;
 use sieveplate_core::{
     spawn_vat, Cap, CapTable, CellError, Metrics, Port, Promises, Rights, VatCtrl, VatDeps,
     VatHandle, VatStatus,
 };
 use sieveplate_fabric::Fabric;
+use sieveplate_jail::SandboxPolicy;
 use sieveplate_store::{ContentStore, EventLog, Hash};
+
+/// Cell isolation mode. `thread` (default): classic in-vat actor.
+/// `process`: a jailed OS process (seccomp + Landlock + mediated pipe).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Isolation {
+    #[default]
+    Thread,
+    Process,
+}
 
 /// Declarative capability grant: `to` is a port path, rights are names.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +61,12 @@ pub struct CellSpec {
     pub persist_on_turn: bool,
     #[serde(default)]
     pub max_restarts: u32,
+    /// `thread` (default) or `process` (jailed OS process).
+    #[serde(default)]
+    pub isolation: Isolation,
+    /// Sandbox policy for process cells (ignored for thread cells).
+    #[serde(default)]
+    pub sandbox: SandboxPolicy,
 }
 
 fn default_persist() -> bool {
@@ -64,6 +81,19 @@ pub struct HostConfig {
     pub vats: Vec<String>,
     #[serde(default = "default_mailbox")]
     pub mailbox_capacity: usize,
+    /// Worker executable for process cells. Defaults to the current exe
+    /// (the `sieve` binary supports `sieve __worker`).
+    #[serde(default)]
+    pub worker_exe: Option<PathBuf>,
+    /// Graceful shutdown (default): let in-flight turns finish (drain).
+    /// When false, `shutdown` HARD-STOPS vats — in-flight turns are
+    /// dropped mid-flight, replies never sent (crash semantics).
+    #[serde(default = "default_drain")]
+    pub drain_on_shutdown: bool,
+}
+
+fn default_drain() -> bool {
+    true
 }
 
 fn default_vats() -> Vec<String> {
@@ -90,6 +120,9 @@ pub struct Host {
     pub log: Arc<EventLog>,
     pub metrics: Arc<Metrics>,
     pub registry: Arc<sieveplate_core::TemplateRegistry>,
+    /// Process-cell backing store (empty unless process cells exist).
+    pub procs: Arc<ProcCellManager>,
+    drain_on_shutdown: bool,
     vats: Vec<(String, VatHandle)>,
 }
 
@@ -129,6 +162,12 @@ impl Host {
             ],
         );
 
+        let worker_exe = cfg
+            .worker_exe
+            .clone()
+            .unwrap_or_else(|| std::env::current_exe().unwrap_or_else(|_| PathBuf::from("sieve")));
+        let procs = Arc::new(ProcCellManager::new(Arc::clone(&store), worker_exe));
+
         Ok(Host {
             host: cfg.host,
             fabric,
@@ -136,6 +175,8 @@ impl Host {
             log,
             metrics,
             registry,
+            procs,
+            drain_on_shutdown: cfg.drain_on_shutdown,
             vats,
         })
     }
@@ -149,7 +190,40 @@ impl Host {
     }
 
     /// Create a cell from a template, with capability grants.
+    /// `isolation = Process` spawns a jailed OS process instead.
     pub async fn create_cell(&self, spec: &CellSpec) -> Result<(), CellError> {
+        if spec.isolation == Isolation::Process {
+            let caps = spec
+                .caps
+                .iter()
+                .map(|c| {
+                    Ok(Cap {
+                        target: sieveplate_core::parse_port(&c.to, &self.host, &spec.vat)?,
+                        rights: Rights::parse(&c.rights)?,
+                    })
+                })
+                .collect::<Result<Vec<Cap>, CellError>>()?;
+            self.procs
+                .create(
+                    &self.fabric,
+                    spec.name.clone(),
+                    spec.vat.clone(),
+                    spec.template.clone(),
+                    caps,
+                    spec.sandbox.clone(),
+                    None,
+                )
+                .await?;
+            let _ = self.log.append(
+                "cell.create",
+                vec![
+                    ("cell".into(), spec.name.clone()),
+                    ("template".into(), spec.template.clone()),
+                    ("isolation".into(), "process".into()),
+                ],
+            );
+            return Ok(());
+        }
         let cell = self.registry.build(&spec.template)?;
         let mut table = CapTable::default();
         for c in &spec.caps {
@@ -184,6 +258,13 @@ impl Host {
 
     /// Destroy a cell (terminates it; content-addressed state remains).
     pub async fn destroy_cell(&self, vat: &str, name: &str) -> Result<(), CellError> {
+        if self.procs.is_proc_cell(vat, name) {
+            self.procs.destroy(vat, name).await?;
+            let _ = self
+                .log
+                .append("cell.destroy", vec![("cell".into(), name.into())]);
+            return Ok(());
+        }
         let (tx, rx) = oneshot::channel();
         self.vat_handle(vat)?
             .ctrl(VatCtrl::Destroy {
@@ -201,6 +282,14 @@ impl Host {
 
     /// Snapshot a cell now; returns the content hash.
     pub async fn snapshot_cell(&self, vat: &str, name: &str) -> Result<Hash, CellError> {
+        if self.procs.is_proc_cell(vat, name) {
+            let h = self.procs.snapshot(vat, name).await?;
+            let _ = self.log.append(
+                "cell.snapshot",
+                vec![("cell".into(), name.into()), ("hash".into(), h.clone())],
+            );
+            return Ok(h);
+        }
         let (tx, rx) = oneshot::channel();
         self.vat_handle(vat)?
             .ctrl(VatCtrl::Snapshot {
@@ -259,7 +348,12 @@ impl Host {
     }
 
     /// Scale a cell to zero (evict → content-addressed snapshot).
+    /// For process cells this KILLS the child OS process; the next message
+    /// respawns it from the content store.
     pub async fn scale_to_zero(&self, vat: &str, name: &str) -> Result<Hash, CellError> {
+        if self.procs.is_proc_cell(vat, name) {
+            return self.procs.scale_to_zero(vat, name).await;
+        }
         let (tx, rx) = oneshot::channel();
         self.vat_handle(vat)?
             .ctrl(VatCtrl::Evict {
@@ -274,6 +368,9 @@ impl Host {
     /// Force-wake a sleeping (or absent-but-stubbed) cell via the
     /// kernel-level `__ping`; returns wake latency in microseconds.
     pub async fn wake(&self, vat: &str, name: &str) -> Result<u64, CellError> {
+        if self.procs.is_proc_cell(vat, name) {
+            return self.procs.wake(&self.fabric, vat, name).await;
+        }
         let port = Port::new(&self.host, vat, name);
         let start = Instant::now();
         let reply = self
@@ -302,6 +399,11 @@ impl Host {
         Ok((out, self.metrics.snapshot_json()))
     }
 
+    /// Process cells: (vat, name, running).
+    pub fn proc_cells(&self) -> Vec<(String, String, bool)> {
+        self.procs.list()
+    }
+
     /// Flat list of cell slots for status output.
     pub async fn cells_status(&self) -> Vec<CellStatus> {
         let (vats, _) = self.status().await.unwrap_or_default();
@@ -325,13 +427,23 @@ impl Host {
         out
     }
 
-    /// Shut the host down (all vats exit).
+    /// Shut the host down. Graceful by default (in-flight turns finish);
+    /// with `drain_on_shutdown = false` vats are aborted mid-turn — the
+    /// crash semantics the adversarial tests rely on.
     pub async fn shutdown(&self) {
         for (_, h) in &self.vats {
+            if !self.drain_on_shutdown {
+                h.abort();
+                continue;
+            }
             let (tx, rx) = oneshot::channel();
             if h.ctrl(VatCtrl::Shutdown { reply: tx }).await.is_ok() {
                 let _ = rx.await;
             }
+        }
+        // Kill any jailed workers too: crash, not drain.
+        for (vat, name, _) in self.procs.list() {
+            let _ = self.procs.destroy(&vat, &name).await;
         }
         let _ = self.log.append("host.shutdown", vec![]);
     }

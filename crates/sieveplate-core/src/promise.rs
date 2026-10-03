@@ -24,7 +24,7 @@ pub type PromiseResult = Result<Vec<u8>, String>;
 /// A message template waiting on a promise: when the promise resolves with
 /// payload `P`, the fabric sends an envelope to `to` with kind `kind` and
 /// payload `P`; its reply resolves `next` (chaining).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Continuation {
     pub to: crate::Port,
     pub kind: String,

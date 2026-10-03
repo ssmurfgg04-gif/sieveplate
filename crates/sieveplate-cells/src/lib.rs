@@ -15,6 +15,7 @@ pub mod counter;
 pub mod echo;
 pub mod greeter;
 pub mod kv;
+pub mod probe;
 
 use std::sync::Arc;
 
@@ -26,6 +27,10 @@ pub fn register_all(registry: &TemplateRegistry) {
     registry.register("builtin:greeter", Arc::new(greeter::GreeterFactory));
     registry.register("builtin:echo", Arc::new(echo::EchoFactory));
     registry.register("builtin:kv", Arc::new(kv::KvFactory));
+    registry.register(
+        "builtin:sandbox-probe",
+        Arc::new(probe::SandboxProbeFactory),
+    );
 }
 
 /// A registry with all bundled cells pre-registered.

@@ -76,6 +76,11 @@ impl Plan {
                 sleep_after_ms: c.sleep_after_ms,
                 persist_on_turn: c.persist_on_turn,
                 max_restarts: c.max_restarts,
+                isolation: match c.isolation.as_deref() {
+                    Some("process") => sieveplate_engine::Isolation::Process,
+                    _ => sieveplate_engine::Isolation::Thread,
+                },
+                sandbox: c.sandbox.clone().unwrap_or_default(),
             })
             .collect();
 

@@ -1,49 +1,59 @@
-# Benchmarks
+# Benchmarks — what every number actually measures
 
-Measured with `cargo run --release -p sieveplate-ctl -- bench --suite all`
-on Linux x86-64 (containerized CI-class core, release profile, 2026-10).
-Absolute numbers vary by machine; the *ratios against target* are the point.
+> Rule for this document, learned the hard way: **a benchmark may claim
+> only what it measures.** In-process message passing is not a VM boot.
+> Evicting an actor is not a process exit. Nothing here is compared
+> against a different kind of cost.
+
+Environment: release build, Linux x86-64, one containerized cloud core.
+Reproduce: `cargo run -p sieveplate-ctl --release -- bench --suite all`.
 
 ## Results
 
-| benchmark | n | p50 | p95 | ops/sec |
-|---|---:|---:|---:|---:|
-| turn: call round-trip (in-proc) | 2000 | **15 µs** | 22 µs | ~63,000 |
-| wake: scale-to-zero → wake cycle | 200 | **34 µs** | 41 µs | — |
-| store: put 4 KiB (content-addressed) | 1000 | **3 µs** | 3 µs | ~321,000 |
-| store: get + verify 4 KiB | 1000 | **5 µs** | 6 µs | ~191,000 |
-| cells: create (template instantiation) | 200 | **20 µs** | 27 µs | — |
-| cells: scale-to-zero (snapshot → CAS) | 200 | **18 µs** | 27 µs | — |
+| benchmark | n | p50 | p95 | what it measures |
+|---|---|---|---|---|
+| turn: call round-trip (in-proc) | 2000 | 15 µs | 23 µs | one request/reply between two actor cells in the same host, same process |
+| wake: scale-to-zero → wake cycle | 200 | 29 µs | 34 µs | actor eviction to CAS stub + restore-on-message **within the same process** |
+| store: put 4 KiB | 1000 | 3 µs | 3 µs | SHA-256 + write + hash-file rename, local disk, warm cache |
+| store: get + verify 4 KiB | 1000 | 5 µs | 6 µs | read + SHA-256 re-verify |
+| cells: create | 200 | 20 µs | 27 µs | template instantiation + cap table wiring (in-proc) |
+| cells: scale-to-zero (snapshot→CAS) | 200 | 23 µs | 35 µs | serialize + persist + drop from memory (in-proc) |
+| **jail: process cell spawn** | 20 | **1.14 ms** | 1.36 ms | REAL `fork+exec`, environment wiped, seccomp filter applied, Landlock attempted, worker init handshake |
+| **jail: first turn round-trip** | 20 | **71 µs** | 84 µs | envelope through length-prefixed pipe, handled in the jailed process, capability re-check at the parent, reply back |
+| **handshake: SIEVE1 full** | 50 | **3.6 ms** | 5.3 ms | complete secure-link handshake: X25519 DH + ML-KEM-768 encapsulation, Ed25519 + ML-DSA-65 dual signature generation AND verification, HKDF key schedule |
 
-## Against the spec's targets
+The `jail` and `handshake` rows exist because the in-process rows say
+nothing about them. A process spawn costs ~55× a cell create; a
+cross-process turn costs ~5× an in-process turn; a hybrid-PQ handshake
+costs ~240× an unencrypted connect. Those are the prices of the
+guarantees, measured, not hidden.
 
-The guiding specification adopted 2026-era targets:
+## What these numbers do NOT measure
 
-| target | value | measured | margin |
-|---|---|---:|---|
-| cell lifecycle ops | millisecond-class | 15–34 µs | ~30–60× under |
-| scale-to-zero | < 10 ms | 18 µs | ~550× under |
-| wake-from-store (restore + ready) | < 10 ms | 34 µs | ~290× under |
-| snapshot restore | < 1 ms (Unikraft class) | 34 µs | ~29× under |
+- **VM boot.** No Firecracker/Unikraft boot is benchmarked (no KVM in the
+  measurement environment). MicroVM cell templates are config-tested, and
+  launch refuses to run without KVM rather than faking it.
+- **Network RTT.** `handshake` and `turn` rows run over in-memory duplex
+  or loopback sockets; add real wire latency for cross-host numbers.
+- **seL4/Microkit cells.** The seL4 port target has its own CI job
+  (build + QEMU boot smoke); it publishes no latency numbers.
+- **Throughput at saturation.** Rows are latency under light load.
+- **eBPF sense path.** Loading and packet delivery are functional-tested
+  (as root in CI), not benchmarked here.
 
-## How to read these numbers
+## Against the original spec's targets
 
-- **turn round-trip** includes the full promise machinery: envelope →
-  mailbox → vat → snapshot → handler → commit → persist-skip → auto-reply
-  → fabric → promise resolution → caller wake. No batching tricks.
-- **wake cycle** is a full evict-then-wake pair per iteration: serialize
-  state → sha256 → fsync'd CAS write, then read → verify → deserialize →
-  re-register → reply. The wake cost is the honest "sleeping actor" price.
-- **store put/get** includes content hashing and, on get, verify-on-read
-  (re-hash). Integrity checking is not optional overhead here — it is the
-  design.
-- The vat processes one message at a time (transactional semantics);
-  throughput scales with vats, per-turn latency does not degrade with
-  concurrency (mailbox backpressure).
+The spec set millisecond-class cell lifecycle and scale-to-zero < 10 ms.
+The in-process rows meet those targets. That statement is now scoped
+exactly: **in-process**. Process-isolated cells are ~1 ms to spawn (still
+under the millisecond-class target on this hardware) and true VM cells
+are gated on hardware we do not claim to have benchmarked.
 
-## Reproduce
+## Historical note
 
-```bash
-cargo run --release -p sieveplate-ctl -- bench --suite all
-# or individually: --suite turns | wake | store | cells
-```
+An earlier revision of this document compared the 15 µs in-process turn
+against a 176 ms Firecracker boot and printed "beats the spec by
+30–550×". That comparison was invalid — an actor message-passing RTT and
+a VM boot are different cost categories — and the claim was removed. The
+correct comparison for isolation costs is now in the table above, measured
+in this repo instead of imported from a different one.

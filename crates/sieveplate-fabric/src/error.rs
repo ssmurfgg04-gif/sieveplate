@@ -15,6 +15,28 @@ pub enum FabricError {
 
     #[error("no local vat: {0}")]
     NoLocalVat(String),
+
+    // ---- secure link (SIEVE1) ----
+    #[error("crypto error: {0}")]
+    Crypto(String),
+
+    #[error("handshake failed: {0}")]
+    Handshake(String),
+
+    #[error(
+        "replayed or reordered frame (expected seq {expected}, got frame of {frame_len} bytes)"
+    )]
+    Replay { expected: u64, frame_len: usize },
+
+    #[error("peer key changed for host '{host}': pinned {expected}, got {got}")]
+    PeerKeyChanged {
+        host: String,
+        expected: String,
+        got: String,
+    },
+
+    #[error("unknown peer host '{host}' (fingerprint {fingerprint}) and strict pinning is on")]
+    UnknownPeer { host: String, fingerprint: String },
 }
 
 impl From<FabricError> for sieveplate_core::CellError {

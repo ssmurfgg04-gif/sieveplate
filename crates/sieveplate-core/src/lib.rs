@@ -27,7 +27,7 @@ pub mod vat;
 
 pub use cap::{Cap, CapTable, Rights};
 pub use cell::{
-    BoxedCell, Cell, CellFactory, RestartPolicy, SleepPolicy, TemplateRegistry, TurnCtx,
+    BoxedCell, Cell, CellFactory, RestartPolicy, SleepPolicy, TemplateRegistry, TurnCtx, TurnRunner,
 };
 pub use envelope::{Envelope, PromiseId};
 pub use error::CellError;

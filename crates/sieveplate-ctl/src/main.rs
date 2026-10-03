@@ -11,6 +11,7 @@
 
 mod bench;
 mod demo;
+mod hearth_cmd;
 mod run;
 mod store_cmd;
 
@@ -30,6 +31,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// INTERNAL: jailed worker process (spawned by `sieve run` for
+    /// process-isolated cells). Not for interactive use.
+    #[command(hide = true, name = "__worker")]
+    __Worker {
+        /// JSON-encoded SandboxPolicy.
+        #[arg(long)]
+        sandbox: String,
+    },
     /// Run the Phase-1 vertical slice: sleep → wake → transact → persist → restore
     Demo {
         /// Reduce output
@@ -74,10 +83,79 @@ enum Cmd {
         #[arg(long, default_value = "all")]
         suite: String,
     },
+    /// Content-addressed versioning: snapshots, branches, diff/ddiff
+    Hearth {
+        #[command(subcommand)]
+        cmd: HearthCmd,
+    },
     /// Content store operations
     Store {
         #[command(subcommand)]
         cmd: StoreCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum HearthCmd {
+    /// Write a blob: `sieve hearth write KEY --text T`
+    Write {
+        key: String,
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long)]
+        file: Option<String>,
+        #[arg(long, default_value = "./runtime")]
+        root: String,
+    },
+    /// Commit a snapshot tree on a branch: entries are `key=blobhash`
+    Snapshot {
+        branch: String,
+        /// key=blobhash entries
+        entries: Vec<String>,
+        #[arg(long, default_value = "")]
+        message: String,
+        #[arg(long, default_value = "./runtime")]
+        root: String,
+    },
+    /// List branches and their tips
+    Branches {
+        #[arg(long, default_value = "./runtime")]
+        root: String,
+    },
+    /// First-parent history of a branch
+    Log {
+        branch: String,
+        #[arg(long, default_value = "./runtime")]
+        root: String,
+    },
+    /// Logical diff between two branch tips
+    Diff {
+        branch_a: String,
+        branch_b: String,
+        #[arg(long, default_value = "./runtime")]
+        root: String,
+    },
+    /// Byte-level delta between two snapshot trees (tree hashes)
+    Ddiff {
+        tree_a: String,
+        tree_b: String,
+        #[arg(long, default_value = "./runtime")]
+        root: String,
+    },
+    /// Reconstruct a tree from a base tree + delta (hash-verified)
+    ApplyDelta {
+        base_tree: String,
+        delta: String,
+        #[arg(long, default_value = "./runtime")]
+        root: String,
+    },
+    /// Materialize a commit's snapshot into a directory
+    Checkout {
+        commit: String,
+        #[arg(long, default_value = "./checkout")]
+        out: String,
+        #[arg(long, default_value = "./runtime")]
+        root: String,
     },
 }
 
@@ -140,6 +218,16 @@ fn init_logging(quiet: bool) {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
+        Cmd::__Worker { sandbox } => {
+            // NO logging on stdout (the protocol pipe owns it).
+            init_logging(true);
+            let policy: sieveplate_jail::SandboxPolicy = serde_json::from_str(&sandbox)
+                .map_err(|e| anyhow::anyhow!("bad sandbox policy: {e}"))?;
+            let registry = sieveplate_cells::builtin_registry();
+            let mut stdin = std::io::stdin();
+            sieveplate_jail::run_worker(&registry, &policy, &mut stdin)
+                .map_err(|e| anyhow::anyhow!("worker exited: {e}"))
+        }
         Cmd::Demo { quiet } => {
             init_logging(quiet);
             demo::run().await
@@ -167,6 +255,43 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Bench { suite } => {
             init_logging(true);
             bench::run(&suite).await
+        }
+        Cmd::Hearth { cmd } => {
+            init_logging(true);
+            match cmd {
+                HearthCmd::Write {
+                    key,
+                    text,
+                    file,
+                    root,
+                } => hearth_cmd::write(&root, &key, &text, &file),
+                HearthCmd::Snapshot {
+                    branch,
+                    entries,
+                    message,
+                    root,
+                } => hearth_cmd::snapshot(&root, &branch, &entries, &message),
+                HearthCmd::Branches { root } => hearth_cmd::branches(&root),
+                HearthCmd::Log { branch, root } => hearth_cmd::log(&root, &branch),
+                HearthCmd::Diff {
+                    branch_a,
+                    branch_b,
+                    root,
+                } => hearth_cmd::diff(&root, &branch_a, &branch_b),
+                HearthCmd::Ddiff {
+                    tree_a,
+                    tree_b,
+                    root,
+                } => hearth_cmd::ddiff(&root, &tree_a, &tree_b),
+                HearthCmd::ApplyDelta {
+                    base_tree,
+                    delta,
+                    root,
+                } => hearth_cmd::apply_delta(&root, &base_tree, &delta),
+                HearthCmd::Checkout { commit, out, root } => {
+                    hearth_cmd::checkout(&root, &commit, &out)
+                }
+            }
         }
         Cmd::Store { cmd } => {
             init_logging(true);

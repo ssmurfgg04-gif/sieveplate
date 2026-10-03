@@ -7,6 +7,7 @@ description = "Bundled reference cells: counter, greeter, echo, kv — with cont
 
 [dependencies]
 sieveplate-core.workspace = true
+tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 bincode.workspace = true

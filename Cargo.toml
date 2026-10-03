@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/sieveplate-store", "crates/sieveplate-core", "crates/sieveplate-cells", "crates/sieveplate-fabric", "crates/sieveplate-engine", "crates/sieveplate-senses", "crates/sieveplate-sysdef", "crates/sieveplate-ctl"]
+members = ["crates/sieveplate-store", "crates/sieveplate-core", "crates/sieveplate-cells", "crates/sieveplate-fabric", "crates/sieveplate-engine", "crates/sieveplate-senses", "crates/sieveplate-sysdef", "crates/sieveplate-hearth", "crates/sieveplate-jail", "crates/sieveplate-microvm", "crates/sieveplate-ctl"]
 
 [workspace.package]
 version = "0.1.0"
@@ -20,6 +20,9 @@ sieveplate-fabric  = { path = "crates/sieveplate-fabric" }
 sieveplate-engine  = { path = "crates/sieveplate-engine" }
 sieveplate-senses  = { path = "crates/sieveplate-senses" }
 sieveplate-sysdef  = { path = "crates/sieveplate-sysdef" }
+sieveplate-hearth  = { path = "crates/sieveplate-hearth" }
+sieveplate-jail    = { path = "crates/sieveplate-jail" }
+sieveplate-microvm = { path = "crates/sieveplate-microvm" }
 
 # external
 serde              = { version = "1", features = ["derive"] }
@@ -38,6 +41,22 @@ futures            = "0.3"
 toml               = "0.8"
 clap               = { version = "4", features = ["derive"] }
 inotify            = "0.11"
+
+# crypto — secure host-to-host links (ADR-0004: hybrid post-quantum)
+x25519-dalek       = { version = "3", features = ["getrandom"] }
+ed25519-dalek      = "3"
+ml-kem             = "0.3"
+ml-dsa             = "0.1"
+chacha20poly1305   = "0.11"
+hkdf               = "0.13"
+hmac               = "0.13"
+zeroize            = "1"
+getrandom          = "0.4"
+
+# kernel-enforced sandboxing for process cells (ADR-0005)
+seccompiler        = "0.5"
+landlock           = "0.4"
+libc               = "0.2"
 
 [profile.release]
 lto = "thin"

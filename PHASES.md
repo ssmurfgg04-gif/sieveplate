@@ -95,9 +95,19 @@ wiring real hardware signals into sleeping cells without kernel patches.
 
 **Spec goal**: cells across hosts, managed declaratively.
 
-- Framed-TCP transport with a `__hello` handshake so peers learn each
-  other's names and replies route back across hosts:
-  `sieveplate-fabric::net`.
+- **SIEVE1 secure links** (`sieveplate-fabric::net` + `::secure` +
+  `::identity`): every TCP connection performs a hybrid post-quantum
+  handshake (X25519 ‖ ML-KEM-768 key exchange, Ed25519 ∧ ML-DSA-65 dual
+  signatures, ChaCha20-Poly1305 frames, sequence-bound AEAD). Peers are
+  authenticated against a TOFU/pinned `known_peers.json`; there is no
+  plaintext mode. **Multi-host is two real machines, not just
+  localhost**: the handshake and trust store are host-independent; the
+  phase-4 test runs two hosts over loopback because CI has loopback —
+  point `[network] peers` at real addresses for real machines.
+- **Crash-failure detection**: link teardown fails all in-flight calls to
+  that peer immediately (`Fabric::peer_disconnected`) — a caller gets an
+  error or an answer, never a silent hang. The adversarial suite kills a
+  peer mid-turn and asserts fast failure (`--test adversarial`).
 - Bidirectional pipelined chains spanning hosts (continuation fires on the
   calling host when the remote reply arrives).
 - Multi-host systems are declarative compositions: per-host specs +
@@ -121,23 +131,37 @@ sieve rollback --root ./runtime                          # apply previous plan
 
 ---
 
-## Phase 5 — Production Hardening ♾️ (ongoing)
+## Phase 5 — Production Hardening ✅ (this revision) / ♾️ (ongoing)
 
 | Spec task | Delivered so far |
 |---|---|
 | Observability | `tracing` throughout; `Metrics` (counters + p50/p95/p99 latency series, JSON snapshot); hash-chained event log; `sieve store verify` |
-| Security | capability enforcement + audit surface (`ctx.capabilities()`, cap tables in status); tamper-evident log; promise failure semantics (no hang); SECURITY.md with reporting policy |
-| Performance | release benchmarks above (BENCHMARKS.md), all targets met with margin |
-| Documentation | README, ARCHITECTURE, PHASES (this file), BENCHMARKS, ADRs, crate-level docs |
-| Community | Apache-2.0, CONTRIBUTING.md, CI (fmt + clippy -D warnings + tests + demo smoke) |
+| Security — kernel level | **process cells**: seccomp default-deny + Landlock + mediated pipe (`sieveplate-jail`), caps re-checked at the parent boundary; adversarial tests spawn real workers and assert socket()/open() denial (ADR-0005) |
+| Security — links | **SIEVE1 hybrid post-quantum secure links** on every host connection, TOFU pinning + strict mode (ADR-0004); replay/tamper/impostor tests |
+| Security — storage | CAS verify-on-read (corruption refused); hash-chained log (forgery rejected); hearth delta hash-verified apply |
+| Failure containment | promise failure on rollback; peer-crash detection fails in-flight calls fast; process-cell respawn from CAS |
+| Versioning | **Hearth layer**: content-addressed snapshots, branches + reflog, logical `diff` (branch level), byte-level `ddiff` (snapshot level) — `sieve hearth ...` |
+| Performance | honest benchmarks: every row states what it measures and what it does NOT (BENCHMARKS.md); new jail + handshake suites measure real isolation/crypto costs |
+| Documentation | README, ARCHITECTURE, PHASES (this file), BENCHMARKS, SECURITY, ADR-0001..0005 (platform matrix, capability bridge, PQ policy) |
+| Community | Apache-2.0, CONTRIBUTING.md, CI: fmt + clippy -D warnings + tests + jail/adversarial + **eBPF load as root** + **seL4 build & QEMU boot smoke** + **nix flake check** |
 
 ---
 
 ## The full verification sweep
 
 ```bash
-cargo test --workspace                          # 28 tests: units + integration
-cargo run -p sieveplate-ctl --release -- demo   # Phase-1 vertical slice, live
-cargo run -p sieveplate-ctl --release -- bench --suite all
-sieve run -f examples/system.toml               # declarative system until Ctrl-C
+cargo test --workspace                                     # all units + integration
+cargo test -p sieveplate-ctl --test jail                   # real process cells: seccomp denial
+cargo test -p sieveplate-ctl --test adversarial            # kill-node / corrupt-blob / forged-log
+cargo run -p sieveplate-ctl --release -- demo              # Phase-1 vertical slice, live
+cargo run -p sieveplate-ctl --release -- bench --suite all # honest benchmarks (jail + handshake included)
+sieve run -f examples/system.toml                          # declarative system until Ctrl-C
+sudo cargo test -p sieveplate-senses -- --ignored          # eBPF: real bpf(2) load + packet events (root)
+# hearth: snapshot → branch → diff → ddiff → verified rebuild
+R=./rt; sieve hearth write k --text v1 --root $R
+T=$(sieve hearth snapshot main k=$(sieve hearth write k --text v2 --root $R | cut -f2) --root $R | head -1 | cut -f2)
+sieve hearth diff main main --root $R
 ```
+
+CI (GitHub Actions) runs all of it, including the eBPF root test, the
+seL4 Microkit build + QEMU boot smoke, and `nix flake check`.

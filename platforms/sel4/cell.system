@@ -1,35 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  sieveplate — seL4 Microkit system description (skeleton, port target).
+  sieveplate — seL4 Microkit system description (the CI-built one).
 
-  Two protection domains: the cell vat (runs the actor event loop) and the
-  store (owns the content-addressed storage region). Two endpoints carry
-  request/reply IPC — the kernel-backed equivalent of the fabric's Route.
-
-  This file is a sketch for the port described in README.md; it is not
-  built by this repository's CI.
+  One protection domain hosting the reference cell turn loop: proof that
+  this repository builds and BOOTS seL4. The full two-PD mapping (vat PD +
+  store PD over endpoint capabilities) is documented in README.md and is
+  the port target's next step.
 -->
 <system>
-    <memory_region name="cas_region" size="0x400000" />
-
-    <protection_domain name="core_vat" priority="100">
-        <program_image path="core_vat.elf" />
-        <stack size="0x8000" />
+    <protection_domain name="cell" priority="100" stack_size="0x8000">
+        <program_image path="cell.elf" />
     </protection_domain>
-
-    <protection_domain name="store" priority="90">
-        <program_image path="store.elf" />
-        <stack size="0x4000" />
-        <map region="cas_region" />
-    </protection_domain>
-
-    <endpoint name="cell_requests">
-        <protection_domain name="core_vat" />
-        <protection_domain name="store" />
-    </endpoint>
-
-    <endpoint name="cell_replies">
-        <protection_domain name="store" />
-        <protection_domain name="core_vat" />
-    </endpoint>
 </system>

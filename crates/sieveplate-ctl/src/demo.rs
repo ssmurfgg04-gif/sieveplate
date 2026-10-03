@@ -41,6 +41,8 @@ pub async fn run() -> Result<()> {
             host: host_name.into(),
             vats: vec!["core".into()],
             mailbox_capacity: 1024,
+            worker_exe: None,
+            drain_on_shutdown: true,
         },
         &root,
     )?;
@@ -52,6 +54,8 @@ pub async fn run() -> Result<()> {
         sleep_after_ms: None,
         persist_on_turn: true,
         max_restarts: 3,
+        isolation: sieveplate_engine::Isolation::Thread,
+        sandbox: Default::default(),
     };
     let t0 = Instant::now();
     host.create_cell(&counter).await?;

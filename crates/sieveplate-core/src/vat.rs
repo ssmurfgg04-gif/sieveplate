@@ -108,9 +108,16 @@ pub struct VatStatus {
 pub struct VatHandle {
     pub name: String,
     tx: mpsc::Sender<VatInput>,
+    task: std::sync::Arc<tokio::task::JoinHandle<()>>,
 }
 
 impl VatHandle {
+    /// HARD-STOP: abort the vat task. In-flight turns are dropped
+    /// mid-flight (no drain, no replies). Used by crash semantics.
+    pub fn abort(&self) {
+        self.task.abort();
+    }
+
     /// Send an envelope into the vat's mailbox.
     pub async fn send_env(&self, env: Envelope) -> Result<(), CellError> {
         self.tx
@@ -173,10 +180,11 @@ pub fn spawn(deps: VatDeps) -> VatHandle {
         registry: deps.registry,
         promises: deps.promises,
     };
-    tokio::spawn(vat.run(rx));
+    let task = std::sync::Arc::new(tokio::spawn(vat.run(rx)));
     VatHandle {
         name: deps.name,
         tx,
+        task,
     }
 }
 

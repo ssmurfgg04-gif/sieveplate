@@ -12,9 +12,12 @@ what runs today, and what is a port target.
 | L5 | Actor Cell Substrate ("the tissue") | `sieveplate-core` | **runs** |
 | L4 | Cell Instantiation Engine ("the membrane") | `sieveplate-engine` | **runs** |
 | L3 | Content-Addressable Semantic Store ("the memory") | `sieveplate-store` | **runs** |
-| L2 | Verified Kernel Foundation ("the skeleton") | `sieveplate-core::cap` + `platforms/sel4` | userspace now; seL4 port target |
-| L1 | eBPF Sensory Layer ("the nerves") | `sieveplate-senses` + `ebpf/` | timer/TCP/inotify run; eBPF bridge is bpftool-based |
-| L0 | Memory-Centric Hardware Path | abstraction only | future |
+| L3b | Hearth — versioning (snapshots/branches/diff/ddiff) | `sieveplate-hearth` | **runs** |
+| L2 | Verified Kernel Foundation ("the skeleton") | `sieveplate-core::cap` + `platforms/sel4` | userspace now; seL4 build+boot smoke in CI; full port in progress |
+| L1 | eBPF Sensory Layer ("the nerves") | `sieveplate-senses::ebpf` + `ebpf/` | timer/TCP/inotify run; **real bpf(2) loader** (root-gated, CI-verified as root) |
+| L0 | Memory-Centric Hardware Path (+ quantum as a capability-guarded peripheral — a note, not a phase) | abstraction only | future |
+| — | Process isolation ("the membrane's teeth") | `sieveplate-jail` | **runs** — seccomp+Landlock, adversarially tested |
+| — | MicroVM cells | `sieveplate-microvm` | config-tested; launch gated on KVM + binary, honestly unavailable elsewhere |
 
 ## Design decisions that shape everything
 
@@ -47,9 +50,20 @@ with `NoCap` otherwise. Authorities are created by `insert`, narrowed by
 `attenuate` (subset-of-parent, enforced), and destroyed by `revoke`
 (immediate; resolution fails from that instant).
 
-On the seL4 port (`platforms/sel4/README.md`) this table is backed by real
-kernel capabilities inside a Microkit protection domain. The userspace
-semantics were deliberately chosen to match so the port is mechanical.
+**The capability bridge — three layers, not one system.** The original
+plan said Goblins-style capabilities "map directly" onto seL4 kernel
+capabilities. They do not: language caps are object references checked in
+a turn context; seL4 caps are kernel objects. Sieveplate states them as
+three enforcement layers (see [ADR-0005](docs/adr/0005-process-cells-capability-bridge.md)):
+
+1. **language** — the CapTable in the turn context (routing authority);
+2. **OS** — seccomp/Landlock/rlimits around `isolation = "process"`
+   cells (bounding what buggy cell code can do to the machine, with the
+   parent re-checking every emitted envelope against the same table);
+3. **kernel (port target)** — seL4 caps via an explicit adapter
+   (`attenuate` → `CNode_Copy` with rights mask; `revoke` →
+   `CNode_Revoke`). The adapter is *not* formally verified; seL4's proofs
+   cover the kernel, nothing else.
 
 ### 4. Promises are the composition primitive (L6)
 
@@ -88,8 +102,12 @@ for a *running* system rather than a package set.
 Messages: mpsc mailboxes → vat loop → fabric → mailboxes. All async, all
 event-driven. Sense sources: tokio timers, TCP reads, inotify — all push.
 The only timer in the system is a 50 ms control-plane sweep that advances
-idle eviction; it is never in the message path. The eBPF bridge consumes
-kernel events as appended JSON lines (inotify-driven) — see `ebpf/`.
+idle eviction; it is never in the message path. The eBPF sense is a real
+loader: it builds raw `bpf_insn`, loads via the `bpf(2)` syscall
+(`BPF_PROG_LOAD`, socket filter), attaches to an `AF_PACKET` socket
+(`SO_ATTACH_BPF`) and feeds packet events into the pump. It requires
+root/CAP_BPF on modern kernels and **reports that requirement as an
+error** rather than faking events; CI runs the load test as root.
 
 ## Failure model
 
@@ -101,19 +119,48 @@ kernel events as appended JSON lines (inotify-driven) — see `ebpf/`.
 | Vat exit | cells' last snapshots live in CAS | re-attach vat → stubs wake |
 | Store corruption | detected on read (hash verify) | restore from replicas (operator) |
 | Event log tamper | verify() fails on open | restore from backup; chain proves where |
-| Network partition | peer send errors | retry at caller; promises fail fast with reason |
+| Network partition / **peer crash** | link teardown detected; **all in-flight calls to that peer fail immediately** (`peer_disconnected`) | retry at caller; promises fail fast with reason — never a silent hang |
+| Jailed worker crash / seccomp kill | pipe EOF observed by the parent; in-flight calls fail | scale-to-zero respawn from CAS on next message |
 | Promise never resolves | timeout at the call site | cancel; late replies ignored (foreign guard) |
 
 ## What is NOT here (honest scope)
 
-- **No hardware isolation in-process.** Vats isolate by discipline (single
-  thread, message passing), not by MMU. The seL4 port target exists
-  precisely because this is the boundary of the current design.
+- **Hardware isolation is opt-in per cell.** Thread cells isolate by
+  discipline; `isolation = "process"` cells get kernel-enforced seccomp/
+  Landlock sandboxing (ADR-0005); `isolation = "microvm"` cells get
+  hardware virtualization **only where KVM and a hypervisor actually
+  exist** — `sieveplate-microvm` refuses to launch otherwise and says
+  exactly what is missing. The seL4 port target completes the ladder.
 - **WASI components are not yet a cell template kind.** The `cas:`
-  template prefix is reserved for content-addressed templates; a Wasmtime
-  factory is future work.
-- **CapTP-style wire security is out of scope.** The TCP fabric is framed
-  and handshake-mapped but unencrypted; put it behind a tunnel for
-  untrusted networks.
-- **The Datalog engine is naive-fixpoint.** Fine for log-scale facts;
-  swap for semi-naive/Soufflé when programs grow.
+  template prefix is reserved for content-addressed templates; a
+  Wasmtime factory is the next template kind on the list (tracked, not
+  built).
+- **"No compile times" is only partly true, stated exactly.** Templates
+  are content-addressed factories, so *deployed systems* change by
+  substitution, not recompilation. But Nix substitution only helps for
+  things someone has already built: a fresh `nix build` of this closure
+  compiles at least once. We also deliberately did NOT adopt Soufflé for
+  Datalog: it is a C++ code generator, which conflicts with live,
+  interactive log queries — the in-process naive-fixpoint engine is the
+  honest tradeoff (swap for semi-naive when programs grow).
+- **Post-quantum signatures: hybrid KEM now, ML-DSA identity rotation
+  designed but the identity file format is not frozen.** Link traffic is
+  harvest-now-decrypt-later safe (ADR-0004); at-rest encryption is an
+  operator layer.
+- **The eBPF sense needs root** on modern kernels; the loader reports
+  the privilege boundary as an error, and CI proves the path as root.
+- **Multi-host routing is link-local.** No mesh routing/multi-hop relay
+  across peers yet; envelopes travel one hop per configured link.
+
+## Platform matrix
+
+The isolation substrates do NOT stack ("seL4 under everything" was
+incoherent with eBPF-as-a-Linux-feature and Firecracker-needs-KVM).
+There are two platform modes; L3–L7 are shared unchanged:
+
+| | **Linux host mode** (primary, CI-verified) | **seL4 mode** (port target) |
+|---|---|---|
+| cell isolation | thread + process (seccomp/Landlock) | Microkit protection domains |
+| microVM cells | Firecracker / cloud-hypervisor under KVM | unikernel images replace them |
+| senses | timer/TCP/inotify/**eBPF** | IRQ-driven driver PDs (no eBPF on seL4) |
+| drivers | Linux | LionsOS/native PDs (system-VM fallback keeps its big-TCB cost on the ledger) |

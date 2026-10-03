@@ -10,6 +10,7 @@ sieveplate-core.workspace = true
 sieveplate-store.workspace = true
 sieveplate-fabric.workspace = true
 sieveplate-cells.workspace = true
+sieveplate-jail.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

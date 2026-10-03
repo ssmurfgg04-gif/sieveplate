@@ -15,7 +15,18 @@ pub type PeerTx = mpsc::Sender<Vec<u8>>;
 
 struct Inner {
     host: String,
+    /// Promises awaiting a REMOTE reply: pid → peer host. On peer
+    /// disconnect every entry for that peer fails fast (crash detection).
+    inflight: RwLock<HashMap<PromiseId, String>>,
+    /// Live link tasks (accept loops + connection pumps). `crash_links`
+    /// aborts them all, closing every socket — a host-level crash.
+    links: RwLock<Vec<tokio::task::JoinHandle<()>>>,
+    /// Listener handle (Network::shutdown aborts this).
+    listener: RwLock<Option<tokio::task::JoinHandle<()>>>,
     locals: RwLock<HashMap<String, mpsc::Sender<VatInput>>>,
+    /// Per-cell proxies (process cells): raw envelope senders keyed
+    /// "vat/cell". Take precedence over whole-vat mailboxes.
+    proxies: RwLock<HashMap<String, mpsc::Sender<Envelope>>>,
     peers: RwLock<HashMap<String, PeerTx>>,
     promises: Promises,
 }
@@ -32,7 +43,11 @@ impl Fabric {
         Fabric {
             inner: Arc::new(Inner {
                 host: host.into(),
+                inflight: RwLock::new(HashMap::new()),
+                links: RwLock::new(Vec::new()),
+                listener: RwLock::new(None),
                 locals: RwLock::new(HashMap::new()),
+                proxies: RwLock::new(HashMap::new()),
                 peers: RwLock::new(HashMap::new()),
                 promises,
             }),
@@ -56,6 +71,24 @@ impl Fabric {
             .insert(vat.to_string(), tx);
     }
 
+    /// Register a per-cell proxy target (process cells): envelopes whose
+    /// `to` resolves to this vat/cell pair go to the proxy verbatim.
+    pub fn attach_proxy(&self, vat: &str, cell: &str, tx: mpsc::Sender<Envelope>) {
+        self.inner
+            .proxies
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(format!("{vat}/{cell}"), tx);
+    }
+
+    pub fn drop_proxy(&self, vat: &str, cell: &str) {
+        self.inner
+            .proxies
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&format!("{vat}/{cell}"));
+    }
+
     /// Register (or replace) a remote peer's frame sender.
     pub fn attach_peer(&self, host: &str, tx: PeerTx) {
         self.inner
@@ -71,6 +104,66 @@ impl Fabric {
             .write()
             .unwrap_or_else(|p| p.into_inner())
             .remove(host);
+    }
+
+    /// Crash detection: the link to `host` broke. Every in-flight call to
+    /// that peer fails immediately — a caller waits for an ANSWER or a
+    /// FAILURE, never for a timeout that hides the difference.
+    pub fn peer_disconnected(&self, host: &str) {
+        self.drop_peer(host);
+        let mut inflight = self
+            .inner
+            .inflight
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
+        let dead: Vec<PromiseId> = inflight
+            .iter()
+            .filter(|(_, peer)| peer.as_str() == host)
+            .map(|(pid, _)| *pid)
+            .collect();
+        for pid in dead {
+            inflight.remove(&pid);
+            self.inner
+                .promises
+                .resolve_fail(pid, format!("peer '{host}' disconnected"));
+        }
+    }
+
+    /// Register a link task for crash teardown.
+    pub fn track_link(&self, task: tokio::task::JoinHandle<()>) {
+        self.inner
+            .links
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(task);
+    }
+
+    /// Set the listener task (so crash_links can stop accepting too).
+    pub fn track_listener(&self, task: tokio::task::JoinHandle<()>) {
+        *self
+            .inner
+            .listener
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = Some(task);
+    }
+
+    /// CRASH: abort every link task and the listener. Sockets close; the
+    /// far end sees EOF and runs its own crash detection.
+    pub fn crash_links(&self) {
+        if let Some(l) = self
+            .inner
+            .listener
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+        {
+            l.abort();
+        }
+        let mut guard = self.inner.links.write().unwrap_or_else(|p| p.into_inner());
+        let links = std::mem::take(&mut *guard);
+        for t in links {
+            t.abort();
+        }
     }
 
     /// List connected peer hosts.
@@ -145,6 +238,23 @@ impl Fabric {
 
     async fn deliver_local(&self, env: Envelope) -> Result<(), CellError> {
         let vat_name = env.to.vat.clone();
+        // Per-cell proxies (process cells) take precedence over the
+        // whole-vat mailbox: envelopes for a jailed cell never enter the
+        // vat — the parent mediates them.
+        let cell_key = format!("{}/{}", env.to.vat, env.to.cell);
+        let proxy = self
+            .inner
+            .proxies
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&cell_key)
+            .cloned();
+        if let Some(tx) = proxy {
+            return tx
+                .send(env)
+                .await
+                .map_err(|_| CellError::VatClosed(cell_key));
+        }
         let tx = self
             .inner
             .locals
@@ -166,6 +276,14 @@ impl Fabric {
 
     async fn deliver_remote(&self, env: Envelope) -> Result<(), CellError> {
         let host_name = env.to.host.clone();
+        // Track the call so a peer crash can fail it fast.
+        if let Some(pid) = env.reply_to {
+            self.inner
+                .inflight
+                .write()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(pid, host_name.clone());
+        }
         let bytes = crate::net::frame(&env)?;
         let tx = self
             .inner
@@ -205,6 +323,11 @@ impl Route for Fabric {
         // Replies resolve their promise here (whoever receives them) and
         // fire any piped continuations chained onto it.
         if env.kind == Envelope::KIND_REPLY {
+            self.inner
+                .inflight
+                .write()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&env.id);
             let conts = self
                 .inner
                 .promises

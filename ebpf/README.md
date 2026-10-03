@@ -1,11 +1,18 @@
-# ebpf — L1 kernel-event bridge (reference implementation)
+# ebpf — L1 kernel-event bridge
 
 The spec's L1: hardware/kernel events become cell messages with zero
-kernel modification and zero polling. This directory carries the
-**reference bridge**: eBPF programs that observe kernel events, plus a
-loader that streams them as JSON lines into the `file` sense source of
-`sieveplate-senses`, which wakes sleeping cells through inotify — the
-exact path production events take.
+kernel modification and zero polling. There are now TWO real paths:
+
+1. **In-process loader** (`sieveplate-senses::ebpf`) — the primary path.
+   Builds raw `bpf_insn` (no LLVM), loads a socket filter via the
+   `bpf(2)` syscall, attaches to `AF_PACKET` with `SO_ATTACH_BPF`, and
+   feeds packet events straight into the signal pump. Requires
+   root/CAP_BPF on modern kernels; **the privilege requirement is an
+   explicit error, never faked**. CI runs the real load-and-receive test
+   as root (`sudo cargo test -p sieveplate-senses -- --ignored`).
+2. **Reference C bridge** (this directory) — a bpftool-based program +
+   JSON-lines stream into the file sense. Kept as the documented
+   reference for kernel-event shapes; see the table below.
 
 ```
 kernel event ──▶ eBPF program ──▶ ring buffer ──▶ bpftool/cat ──▶ events.jsonl

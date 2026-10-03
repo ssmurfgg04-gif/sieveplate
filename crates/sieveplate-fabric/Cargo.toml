@@ -8,8 +8,21 @@ description = "L6: asynchronous dataflow orchestration — promise pipelining, d
 [dependencies]
 sieveplate-core.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 bincode.workspace = true
+# hkdf 0.13 sits on digest 0.11 — sha2 must match (0.10 would be a
+# different, incompatible Sha256 type)
+sha2 = "0.11"
 tokio.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
+x25519-dalek.workspace = true
+ed25519-dalek.workspace = true
+ml-kem.workspace = true
+ml-dsa.workspace = true
+chacha20poly1305.workspace = true
+hkdf.workspace = true
+zeroize.workspace = true
+getrandom.workspace = true
+hex.workspace = true

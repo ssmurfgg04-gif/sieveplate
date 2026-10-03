@@ -13,6 +13,12 @@ pub struct EchoCell {
 impl Cell for EchoCell {
     async fn handle(&mut self, env: &Envelope, ctx: &mut TurnCtx<'_>) -> Result<(), CellError> {
         self.echoed += 1;
+        // `sleep` verb: first 8 bytes = milliseconds (u64 LE). Lets tests
+        // hold a call in flight deterministically, then kill the peer.
+        if env.kind == "sleep" && env.payload.len() >= 8 {
+            let ms = u64::from_le_bytes(env.payload[..8].try_into().unwrap());
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+        }
         ctx.set_reply(env.payload.clone());
         Ok(())
     }

@@ -7,6 +7,7 @@ description = "L7: declarative system definition — spec → plan → closure h
 
 [dependencies]
 sieveplate-engine.workspace = true
+sieveplate-jail.workspace = true
 sieveplate-core.workspace = true
 sieveplate-store.workspace = true
 sieveplate-cells.workspace = true

@@ -91,6 +91,13 @@ pub struct CellCfg {
     pub persist_on_turn: bool,
     #[serde(default = "default_restarts")]
     pub max_restarts: u32,
+    /// `thread` (default) or `process` (jailed OS process with seccomp +
+    /// Landlock). See ADR-0005.
+    #[serde(default)]
+    pub isolation: Option<String>,
+    /// Sandbox policy JSON for process cells.
+    #[serde(default)]
+    pub sandbox: Option<sieveplate_jail::SandboxPolicy>,
 }
 
 fn default_vat() -> String {

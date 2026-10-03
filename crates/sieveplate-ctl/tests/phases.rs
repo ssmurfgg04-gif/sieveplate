@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use sieveplate_core::Port;
-use sieveplate_engine::{CellSpec, Host, HostConfig};
+use sieveplate_engine::{CellSpec, Host, HostConfig, Isolation};
 use sieveplate_senses::{SensePump, Signal, SignalRoute};
 
 fn spec(
@@ -21,6 +21,8 @@ fn spec(
         sleep_after_ms: sleep,
         persist_on_turn: true,
         max_restarts: 3,
+        isolation: Isolation::Thread,
+        sandbox: Default::default(),
     }
 }
 
@@ -35,6 +37,8 @@ async fn phase2_pipelined_cross_cell_chain() {
             host: "p2".into(),
             vats: vec!["core".into()],
             mailbox_capacity: 1024,
+            worker_exe: None,
+            drain_on_shutdown: true,
         },
         &root,
     )
@@ -93,6 +97,8 @@ async fn phase3_sense_wakes_sleeping_cell() {
             host: "p3".into(),
             vats: vec!["core".into()],
             mailbox_capacity: 1024,
+            worker_exe: None,
+            drain_on_shutdown: true,
         },
         &root,
     )
@@ -175,6 +181,8 @@ async fn phase4_multi_host_tcp_pipeline() {
             host: "node-a".into(),
             vats: vec!["core".into()],
             mailbox_capacity: 1024,
+            worker_exe: None,
+            drain_on_shutdown: true,
         },
         &root_a,
     )
@@ -184,17 +192,31 @@ async fn phase4_multi_host_tcp_pipeline() {
             host: "node-b".into(),
             vats: vec!["core".into()],
             mailbox_capacity: 1024,
+            worker_exe: None,
+            drain_on_shutdown: true,
         },
         &root_b,
     )
     .unwrap();
 
-    // node-b listens; node-a connects.
-    let net_b = sieveplate_fabric::serve(host_b.fabric.clone(), "127.0.0.1:0")
+    // node-b listens; node-a connects. Both sides use ephemeral test
+    // identities with TOFU peer stores (the first connection pins).
+    let mk_link = |tag: &str| {
+        let dir = std::env::temp_dir().join(format!("sp-p4-link-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let identity = sieveplate_fabric::HostIdentity::load_or_create(&dir, tag).unwrap();
+        let peers = std::sync::Arc::new(
+            sieveplate_fabric::KnownPeers::open(dir.join("known_peers.json")).unwrap(),
+        );
+        sieveplate_fabric::LinkConfig::new(identity, peers)
+    };
+    let link_b = mk_link("node-b");
+    let net_b = sieveplate_fabric::serve(host_b.fabric.clone(), "127.0.0.1:0", link_b)
         .await
         .unwrap();
     let addr = net_b.local_addr;
-    sieveplate_fabric::connect_peer(&host_a.fabric, "node-b", &addr.to_string())
+    let link_a = mk_link("node-a");
+    sieveplate_fabric::connect_peer(&host_a.fabric, "node-b", &addr.to_string(), &link_a)
         .await
         .unwrap();
 

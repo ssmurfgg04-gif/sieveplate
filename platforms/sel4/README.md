@@ -1,11 +1,35 @@
 # platforms/sel4 — the seL4 / Microkit port target
 
-Status: **port target — not built in this repository.**
+Status: **port target — CI builds a real seL4 system and boots it under
+QEMU as a smoke test.** The full runtime port is in progress; the honest
+boundary statements live in
+[ADR-0005](../../docs/adr/0005-process-cells-capability-bridge.md).
 
-This directory documents how the userspace runtime maps onto a formally
-verified seL4 foundation (LionsOS architecture, seL4 Microkit protection
-domains). The userspace semantics were chosen to make this port
-mechanical rather than architectural.
+## What CI actually proves
+
+The `sel4` job downloads the pinned Microkit SDK (2.0.1), compiles
+`cell.c` (one protection domain hosting the reference cell skeleton)
+against `libmicrokit`, links a `loader.img` with the seL4 kernel, boots
+it under `qemu-system-aarch64` (virt, virtualization=on), and requires
+the `sieveplate-seL4-cell boot OK` banner on the console. If seL4 stops
+booting, or the system description breaks, the job goes red.
+
+## Platform matrix (why there is no eBPF or Firecracker "under seL4")
+
+The original plan stacked seL4 under everything while also using eBPF
+(a Linux feature) and Firecracker (needs Linux/KVM). That was incoherent.
+Per platform:
+
+| capability | Linux host mode (primary) | seL4 mode (this port) |
+|---|---|---|
+| cell isolation | thread cells + seccomp/Landlock process cells | Microkit protection domains |
+| capability enforcement | language CapTable + OS sandbox | language CapTable + **seL4 kernel caps** |
+| senses (L1) | timer/TCP/inotify/eBPF (Linux) | IRQ-driven drivers posting to shared-memory rings |
+| microVM cells | Firecracker / cloud-hypervisor under KVM | **not applicable** — unikernel images replace them |
+| drivers | Linux | LionsOS/native driver PDs (a "system VM for drivers" fallback is documented but keeps its big-TCB cost on the ledger) |
+
+L3–L7 (store, hearth, core semantics, fabric model, sysdef) are
+platform-agnostic and shared unchanged.
 
 ## Mapping
 
@@ -14,33 +38,47 @@ mechanical rather than architectural.
 | Vat | Protection Domain (PD), one event loop, no shared memory |
 | Cell | Private state inside a PD; cross-PD cells = cross-PD message |
 | Envelope / `Route` | seL4 IPC (endpoint capabilities); `deliver()` → `seL4_Call` on the endpoint cap |
-| `CapTable` (slot indices, insert/attenuate/revoke) | CNode slots (CPtrs); `mint`/`copy` with rights masking/`revoke` — semantics already identical |
+| `CapTable` (slot indices, insert/attenuate/revoke) | CNode slots (CPtrs); `mint`/`copy` with rights masking / `revoke` — semantics already identical |
 | `Rights` bits | seL4 cap rights (Grant/Read/Write) + app-level policy bits |
 | Fabric (L6) | Static route table fixed at build time (LionsOS composition discipline) |
 | Content store (L3) | Region in a memory PD or virtio-blk-backed partition; CAS layout unchanged |
-| Sense sources (L1) | IRQ-driven eBPF-equivalent: device drivers post to shared-memory rings, wake vats (no polling) |
-| `__ping` wake probe | kernel IPC ping; restore-from-CAS is userspace logic, unchanged |
+| `__ping` wake probe | kernel IPC ping; restore-from-CAS stays userspace logic |
 
-## What the port must supply
+## The capability bridge — stated as a bridge, not a mapping
+
+Goblins-style capabilities (our `CapTable`: unforgeable authority tokens
+= slot indices checked in the turn context) and seL4 kernel capabilities
+(unforgeable kernel objects) are **different systems that do not "map
+directly" onto each other**. The bridge is adapter code with its own
+trust assumptions:
+
+- a `Cap { target, rights }` is minted as a CNode slot with matching
+  rights at cell creation;
+- `attenuate` → `seL4_CNode_Copy` with a rights mask;
+- `revoke` → `seL4_CNode_Revoke` + `Delete`;
+- envelope delivery uses endpoint caps; a cell can only send along caps
+  it holds, which the kernel enforces *in addition to* the language
+  table.
+
+The seL4 proofs cover the **kernel** on specific hardware configs (and
+multicore support is the weak spot). They do NOT cover this bridge, the
+runtime, or the cells. "Verified" is claimed only at that exact scope.
+
+## What the full port must supply
 
 1. **An async executor on seL4** (no std): timer-from-IRQ + a minimal
-   `alloc`. The vat loop is runtime-agnostic by construction (it only
-   needs `tokio`'s mpsc/oneshot — provide shims).
-2. **Persistent storage for the CAS** (virtio-blk via the system PD, or a
+   `alloc`. The vat loop only needs mpsc/oneshot-shaped primitives —
+   provide shims.
+2. **Persistent storage for the CAS** (virtio-blk via a system PD, or a
    static partition; the store is append-only by design).
-3. **A build-time composition step** (Microkit `metaprogram`) that fixes
-   the vat/PD and route table — mirrors `sieveplate-sysdef`'s Plan,
-   evaluated at build time instead of run time.
+3. **Driver PDs** for the senses (no eBPF on seL4 — device IRQs post
+   into the same `Signal` pump, so L5+ is unchanged).
+4. **The cap bridge above**, with tests at the bridge boundary.
 
-## Skeleton system description (Microkit 2.x style)
+## Build + boot locally
 
-See `cell.system`. It sketches two PDs: `core_vat` (runs cells) and
-`store` (owns the CAS region), connected by two endpoints (requests,
-replies) — the minimum viable tissue.
-
-## Why not build seL4 first
-
-See `docs/adr/0002-linux-first-sel4-port-target.md`. The short version:
-the spec's own risk register calls for the Linux fallback first, and every
-interface here is shaped so the port is an implementation swap, not a
-redesign.
+```sh
+# with a Microkit SDK (2.0.1) and QEMU installed
+platforms/sel4/build.sh /path/to/microkit-sdk-2.0.1 qemu_virt_aarch64
+platforms/sel4/boot-smoke.sh
+```
