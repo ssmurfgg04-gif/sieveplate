@@ -70,6 +70,7 @@ pub const fn insn(code: u8, dst: u8, src: u8, off: i16, imm: i32) -> bpf_insn {
     }
 }
 
+#[cfg(test)]
 fn bpf_stmt(code: u8, imm: i32) -> bpf_insn {
     insn(code, 0, 0, 0, imm)
 }

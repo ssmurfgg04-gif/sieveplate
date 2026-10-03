@@ -108,11 +108,13 @@ jobs:
           tar xf microkit-sdk-2.3.1-linux-x86-64.tar.gz
           echo "MICROKIT_SDK=$PWD/microkit-sdk-2.3.1" >> $GITHUB_ENV
 
-      - name: Build seL4 system (qemu_virt_aarch64)
+      # debug config: the release build silences the debug console, and
+      # the smoke test greps the console for the boot banner.
+      - name: Build seL4 system (qemu_virt_aarch64, debug)
         working-directory: platforms/sel4
         run: |
           chmod +x build.sh
-          ./build.sh "$MICROKIT_SDK" qemu_virt_aarch64
+          CONFIG=debug ./build.sh "$MICROKIT_SDK" qemu_virt_aarch64
 
       - name: Boot seL4 under QEMU (smoke)
         working-directory: platforms/sel4
