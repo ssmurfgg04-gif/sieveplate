@@ -1,0 +1,17 @@
+[package]
+name = "sieveplate-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "L4: cell instantiation engine — create/destroy/snapshot/restore/scale-to-zero with latency targets"
+
+[dependencies]
+sieveplate-core.workspace = true
+sieveplate-store.workspace = true
+sieveplate-fabric.workspace = true
+sieveplate-cells.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

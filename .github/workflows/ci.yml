@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace
+
+      - name: Vertical slice smoke (release)
+        run: |
+          cargo build --release -p sieveplate-ctl
+          ./target/release/sieve demo --quiet
+
+      - name: Declarative system smoke
+        run: |
+          ./target/release/sieve apply -f examples/system.toml --root ./runtime
+          ./target/release/sieve plan -f examples/system.toml --root ./runtime
+          ./target/release/sieve status --root ./runtime
+          ./target/release/sieve store verify --root ./runtime

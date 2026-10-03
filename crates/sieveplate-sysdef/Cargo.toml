@@ -1,0 +1,19 @@
+[package]
+name = "sieveplate-sysdef"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "L7: declarative system definition — spec → plan → closure hash → diff/rollback (the DNA)"
+
+[dependencies]
+sieveplate-engine.workspace = true
+sieveplate-core.workspace = true
+sieveplate-store.workspace = true
+sieveplate-cells.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+sha2.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

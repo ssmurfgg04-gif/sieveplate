@@ -1,0 +1,29 @@
+# The Phase-1 vertical slice as a declarative system.
+#   sieve run -f examples/system.toml --root ./runtime
+#
+# A timer sense ticks every 500 ms; each tick wakes the counter cell (or
+# restores it from the content store if it has scaled to zero) and commits
+# one "add" turn. Watch the event log grow:
+#   sieve store verify --root ./runtime
+#   sieve store query 'turn_ok(S, C, M, U)?' --root ./runtime
+
+[system]
+name = "demo"
+
+[[sense]]
+name = "tick"
+kind = "timer"
+period_ms = 500
+
+[[cell]]
+name = "counter"
+vat = "core"
+template = "builtin:counter"
+sleep_after_ms = 250            # scale to zero after 250 ms idle
+persist_on_turn = true
+max_restarts = 3
+
+[[route]]
+from = "sense:tick"
+to = "core/counter"
+name = "add"

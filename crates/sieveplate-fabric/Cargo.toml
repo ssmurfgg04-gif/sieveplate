@@ -1,0 +1,15 @@
+[package]
+name = "sieveplate-fabric"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "L6: asynchronous dataflow orchestration — promise pipelining, declarative routes, framed TCP transport"
+
+[dependencies]
+sieveplate-core.workspace = true
+serde.workspace = true
+bincode.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
