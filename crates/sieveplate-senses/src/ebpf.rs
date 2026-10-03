@@ -52,6 +52,7 @@ const R6: u8 = 6;
 /// Instruction classes / alu ops (linux/bpf.h).
 const BPF_LDX: u8 = 0x01;
 const BPF_JMP: u8 = 0x05;
+const BPF_ALU64: u8 = 0x07;
 const BPF_W: u8 = 0x00;
 const BPF_MEM: u8 = 0x60;
 const BPF_MOV: u8 = 0xb0;
@@ -76,12 +77,12 @@ fn bpf_stmt(code: u8, imm: i32) -> bpf_insn {
 /// The packet-counter program:
 /// `r6 = r1 (skb); r0 = *(u32*)(r6 + 0) /* len */; return r0` — keep all
 /// bytes of every packet; userspace counts frames as they arrive.
+/// Opcodes: 0xbf = ALU64 MOV reg,reg; 0x61 = LDX mem32; 0x95 = EXIT.
 pub fn netmon_program() -> Vec<bpf_insn> {
     vec![
-        insn(BPF_MOV | BPF_X, R6, R1, 0, 0), // r6 = ctx (__sk_buff*)
-        insn(BPF_LDX | BPF_MEM | BPF_W, R0, R6, 0, 0), // r0 = skb->len
-        bpf_stmt(BPF_JMP | BPF_JA, 0),       // (placeholder exit below)
-        insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0), // return r0
+        insn(BPF_ALU64 | BPF_MOV | BPF_X, R6, R1, 0, 0), // r6 = ctx (__sk_buff*)
+        insn(BPF_LDX | BPF_MEM | BPF_W, R0, R6, 0, 0),   // r0 = skb->len
+        insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),            // return r0
     ]
 }
 
@@ -319,13 +320,15 @@ mod tests {
         let p = netmon_program();
         assert!(program_sanity(&p).is_ok());
         // shape: mov, ldx, exit
-        assert_eq!(p.len(), 4);
+        assert_eq!(p.len(), 3);
         assert_eq!(p[1].code, BPF_LDX | BPF_MEM | BPF_W);
         assert_eq!(p[1].off, 0); // __sk_buff.len is at offset 0
                                  // instruction encoding must be exactly 8 bytes (kernel ABI)
         assert_eq!(std::mem::size_of::<bpf_insn>(), 8);
         // regs byte: dst in low nibble, src in high nibble
         assert_eq!(p[0].regs, (R1 << 4) | R6); // mov r6, r1
+        assert_eq!(p[0].code, 0xbf, "ALU64 MOV X");
+        assert_eq!(p[2].code, 0x95, "EXIT");
     }
 
     #[test]

@@ -106,7 +106,7 @@ jobs:
         run: |
           wget -q https://github.com/seL4/microkit/releases/download/2.3.1/microkit-sdk-2.3.1-linux-x86-64.tar.gz
           tar xf microkit-sdk-2.3.1-linux-x86-64.tar.gz
-          echo "MICROKIT_SDK=$PWD/microkit-sdk" >> $GITHUB_ENV
+          echo "MICROKIT_SDK=$PWD/microkit-sdk-2.3.1" >> $GITHUB_ENV
 
       - name: Build seL4 system (qemu_virt_aarch64)
         working-directory: platforms/sel4
