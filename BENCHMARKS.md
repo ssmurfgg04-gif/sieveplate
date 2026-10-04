@@ -68,6 +68,25 @@ cross-process turn costs ~5× an in-process turn; a hybrid-PQ handshake
 costs ~240× an unencrypted connect. Those are the prices of the
 guarantees, measured, not hidden.
 
+## Latest GitHub-runner measurement (bench-vs-linux.yml, ubuntu-latest)
+
+The CI workflow re-measures everything on the actual runner each run —
+these are the numbers from the latest green run, quoted verbatim:
+
+| benchmark | n | p50 | p95 |
+|---|---|---|---|
+| turn: call round-trip (in-proc) | 2000 | 14 µs | 40 µs |
+| wake: scale-to-zero → wake | 200 | 48 µs | 62 µs |
+| store: put 4 KiB | 1000 | 4 µs | 5 µs |
+| store: get + verify 4 KiB | 1000 | 10 µs | 10 µs |
+| jail: process cell spawn | 20 | 1.90 ms | 2.02 ms |
+| jail: first turn round-trip | 20 | 88 µs | 98 µs |
+| handshake: SIEVE1 full (hybrid PQ) | 50 | 4.18 ms | 5.55 ms |
+| linux: UDS round-trip (64 B) | 2000 | 31 µs | 41 µs |
+| linux: TCP loopback round-trip | 2000 | 50 µs | 63 µs |
+| linux: pipe round-trip | 2000 | 27 µs | 44 µs |
+| linux: fork+exec /bin/true | 50 | 523 µs | 613 µs |
+
 ## What these numbers do NOT measure
 
 - **VM boot.** No Firecracker/Unikraft boot is benchmarked (no KVM in the
