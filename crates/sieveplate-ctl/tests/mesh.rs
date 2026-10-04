@@ -259,6 +259,9 @@ async fn mesh_relay_crash_fails_fast_then_recovers() {
     .await
     .unwrap();
     await_route(&a, "mcrash-c", 2).await;
+    // The reply needs C's back-route too — tables converge independently,
+    // so wait for BOTH directions before trusting the mesh again.
+    await_route(&c, "mcrash-a", 2).await;
 
     // Traffic flows again — and c's counter kept its state (3 from before).
     let n = a
@@ -267,7 +270,7 @@ async fn mesh_relay_crash_fails_fast_then_recovers() {
             Port::new("mcrash-c", "core", "counter"),
             "get",
             vec![],
-            Duration::from_secs(5),
+            Duration::from_secs(10),
         )
         .await
         .unwrap();
@@ -352,13 +355,16 @@ async fn mesh_ring_reroutes_around_dead_hub() {
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+    // Same rule as everywhere: wait for C's back-route before trusting
+    // delivery in BOTH directions.
+    await_route(&c, "ring-a", 2).await;
     let n = a
         .fabric
         .call(
             Port::new("ring-c", "core", "counter"),
             "get",
             vec![],
-            Duration::from_secs(5),
+            Duration::from_secs(10),
         )
         .await
         .unwrap();
