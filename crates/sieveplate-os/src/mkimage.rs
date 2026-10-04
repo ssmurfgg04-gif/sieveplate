@@ -1,7 +1,8 @@
 //! `sieve-os mkimage` — assemble a bootable sieveplate image:
 //!   vmlinuz (from the Arch `linux` package)
 //! + initramfs.cpio (our static `init`, busybox, NIC modules)
-//! = everything QEMU needs: `-kernel vmlinuz -initrd initramfs.cpio`.
+//!
+//! ... = everything QEMU needs: `-kernel vmlinuz -initrd initramfs.cpio`.
 //!
 //! The root filesystem IS the initramfs (tmpfs): a live OS. Packages
 //! installed by `spore` land in the tmpfs `/usr` — real binaries, real
@@ -161,12 +162,16 @@ pub fn mkimage(opts: MkimageOpts) -> Result<()> {
 
     // DFS the dependency graph from the wanted modules; emit post-order
     // (dependencies load first). Reads `depends=` straight out of .modinfo.
+    struct ModuleCtx<'a> {
+        module_paths: &'a HashMap<String, String>,
+        builtin: &'a HashSet<String>,
+        linux_pkg: &'a Path,
+        staging: &'a Path,
+    }
+
     fn load_module(
+        ctx: &ModuleCtx<'_>,
         stem: &str,
-        module_paths: &HashMap<String, String>,
-        builtin: &HashSet<String>,
-        linux_pkg: &Path,
-        staging: &Path,
         done: &mut HashSet<String>,
         order: &mut Vec<String>,
         depth: usize,
@@ -175,17 +180,17 @@ pub fn mkimage(opts: MkimageOpts) -> Result<()> {
             return Ok(());
         }
         done.insert(stem.to_string());
-        if builtin.contains(stem) {
+        if ctx.builtin.contains(stem) {
             println!("mkimage: module {stem} is builtin — skip");
             return Ok(());
         }
-        let Some(path) = module_paths.get(stem) else {
+        let Some(path) = ctx.module_paths.get(stem) else {
             println!("mkimage: module {stem} not present — skip");
             return Ok(());
         };
         // stream just this entry out of the package
         let raw = {
-            let f = std::fs::File::open(linux_pkg)?;
+            let f = std::fs::File::open(ctx.linux_pkg)?;
             let dz = zstd::Decoder::new(f)?;
             let mut tar = tar::Archive::new(dz);
             let mut out = None;
@@ -227,37 +232,25 @@ pub fn mkimage(opts: MkimageOpts) -> Result<()> {
             out
         };
         for d in &deps {
-            load_module(
-                d,
-                module_paths,
-                builtin,
-                linux_pkg,
-                staging,
-                done,
-                order,
-                depth + 1,
-            )?;
+            load_module(ctx, d, done, order, depth + 1)?;
         }
         let out_name = format!("/modules/{stem}.ko");
-        std::fs::write(staging.join("modules").join(format!("{stem}.ko")), &ko)?;
+        std::fs::write(ctx.staging.join("modules").join(format!("{stem}.ko")), &ko)?;
         order.push(out_name);
         println!("mkimage: module {stem} ({} bytes)", ko.len());
         Ok(())
     }
 
+    let ctx = ModuleCtx {
+        module_paths: &module_paths,
+        builtin: &builtin,
+        linux_pkg: &linux_pkg,
+        staging: &staging,
+    };
     let mut done = HashSet::new();
     let mut order: Vec<String> = Vec::new();
     for m in WANTED_MODULES {
-        load_module(
-            m,
-            &module_paths,
-            &builtin,
-            &linux_pkg,
-            &staging,
-            &mut done,
-            &mut order,
-            0,
-        )?;
+        load_module(&ctx, m, &mut done, &mut order, 0)?;
     }
     if order.is_empty() {
         bail!("no NIC modules could be staged");

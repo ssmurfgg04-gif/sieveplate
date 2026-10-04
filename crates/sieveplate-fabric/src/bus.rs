@@ -54,11 +54,14 @@ pub struct BusConfig {
 
 impl BusConfig {
     fn token(&self) -> String {
-        if self.token.is_empty() {
-            std::env::var("GITHUB_TOKEN").unwrap_or_default()
-        } else {
-            self.token.clone()
+        if !self.token.is_empty() {
+            return self.token.clone();
         }
+        // Actions exposes its token as GITHUB_TOKEN; the gh CLI (and many
+        // workflows) use GH_TOKEN. Accept both.
+        std::env::var("GITHUB_TOKEN")
+            .or_else(|_| std::env::var("GH_TOKEN"))
+            .unwrap_or_default()
     }
 }
 

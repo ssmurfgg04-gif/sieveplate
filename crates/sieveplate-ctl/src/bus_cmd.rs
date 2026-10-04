@@ -135,7 +135,7 @@ pub async fn run(args: BusArgs) -> Result<()> {
             worker_exe: None,
             drain_on_shutdown: true,
         },
-        &root.join("runtime"),
+        root.join("runtime"),
     )?;
     host.create_cell(&CellSpec {
         name: "ledger".into(),
@@ -233,8 +233,7 @@ pub async fn run(args: BusArgs) -> Result<()> {
     let remote_target: Option<String> = args
         .peers
         .iter()
-        .filter(|p| **p != args.name && !args.links.contains(p))
-        .next()
+        .find(|p| **p != args.name && !args.links.contains(p))
         .cloned();
 
     let host = std::sync::Arc::new(host);
@@ -250,7 +249,7 @@ pub async fn run(args: BusArgs) -> Result<()> {
 
     node.stop();
     host.shutdown().await;
-    let _ = agent;
+    drop(agent);
     std::process::exit(exit_code);
 }
 
@@ -528,7 +527,7 @@ async fn verify_receipts(
                 // Pass 2: endorsed by a verified neighbor?
                 let mut endorsement: Option<(String, Vec<u8>, Vec<u8>)> = None;
                 if let (Some(ed_pub), Some(pq_vk)) = (&pub_ed, &pub_pq) {
-                    for (verifier, (v_ed, v_pq, _)) in &trusted_keys {
+                    for (verifier, (_v_ed, _v_pq, _)) in &trusted_keys {
                         let bodies2 = node.fetch_comment_bodies().await;
                         let _ = &bodies2;
                         // neighbors of the VERIFIER's receipt list `host`

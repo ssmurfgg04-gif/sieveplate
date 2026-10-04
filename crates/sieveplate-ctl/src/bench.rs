@@ -377,14 +377,9 @@ async fn linux_suite(rows: &mut Vec<Row>) -> Result<()> {
     tokio::spawn(async move {
         let mut b = b;
         let mut buf = [0u8; BENCH_PAYLOAD];
-        loop {
-            match b.read_exact(&mut buf).await {
-                Ok(_) => {
-                    if b.write_all(&buf).await.is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
+        while b.read_exact(&mut buf).await.is_ok() {
+            if b.write_all(&buf).await.is_err() {
+                break;
             }
         }
     });
@@ -419,14 +414,9 @@ async fn linux_suite(rows: &mut Vec<Row>) -> Result<()> {
     tokio::spawn(async move {
         if let Ok((mut sock, _)) = listener.accept().await {
             let mut buf = [0u8; BENCH_PAYLOAD];
-            loop {
-                match sock.read_exact(&mut buf).await {
-                    Ok(_) => {
-                        if sock.write_all(&buf).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
+            while sock.read_exact(&mut buf).await.is_ok() {
+                if sock.write_all(&buf).await.is_err() {
+                    break;
                 }
             }
         }

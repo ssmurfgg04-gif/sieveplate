@@ -1,5 +1,4 @@
 // Full scan: report vmlinuz + modules.* files.
-use std::io::Read;
 
 fn main() {
     let path = std::env::args().nth(1).expect("path to .pkg.tar.zst");

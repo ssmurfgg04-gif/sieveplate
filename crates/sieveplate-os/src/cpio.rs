@@ -86,7 +86,7 @@ impl<W: Write> CpioWriter<W> {
         self.inner.write_all(b"TRAILER!!!\0")?;
         // pad to 512 for good measure
         let written = 110 + 11;
-        let pad = (512 - written % 512) % 512 + (4 - (110 + 11) % 4) % 4;
+        let pad = (512 - written % 512) % 512 + (4 - (110 + 11) % 4);
         self.inner.write_all(&vec![0u8; pad])?;
         self.inner.flush()?;
         Ok(())

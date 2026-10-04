@@ -223,9 +223,7 @@ fn parse_term(s: &str) -> Term {
 /// compare (splits on digits so 1.10 > 1.9).
 fn ver_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     fn parts(v: &str) -> Vec<String> {
-        v.split(|c: char| c == '.' || c == '-' || c == '_')
-            .flat_map(|p| split_digits(p))
-            .collect()
+        v.split(['.', '-', '_']).flat_map(split_digits).collect()
     }
     fn split_digits(p: &str) -> Vec<String> {
         let mut out = Vec::new();
