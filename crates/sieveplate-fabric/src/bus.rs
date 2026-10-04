@@ -210,11 +210,15 @@ impl BusNode {
     /// abandoned attempt can never poison a later one. After the handshake
     /// the pump re-keys the peer entry to the announced fabric name.
     pub async fn dial(self: &Arc<Self>, peer: &str) -> tokio::io::DuplexStream {
+        // Unique WIRE id (not a host name): both directions of this virtual
+        // socket address frames to the same id, so a redial gets a fresh,
+        // isolated wire and stale handshake frames can never poison a
+        // later attempt.
         let tag = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let wire_key = format!("{peer}#{tag}");
+        let wire_key = format!("{}>{}#{}", self.name, peer, tag);
         let (user, wire) = tokio::io::duplex(1 << 20);
         let (in_tx, in_rx) = mpsc::channel::<RawFrame>(256);
         // Register the feeder BEFORE returning, so an inbound ServerHello
@@ -279,7 +283,7 @@ impl BusNode {
     }
 
     /// One flush+fetch cycle. Returns when done; call in a loop.
-    pub async fn tick(&self) {
+    pub async fn tick(self: &Arc<Self>) {
         self.flush().await;
         self.fetch().await;
     }
@@ -336,6 +340,8 @@ impl BusNode {
                         "frames": B64.encode(&bytes)
                     })
                 );
+                // `dest` here is a WIRE key; the receiving side matches its
+                // feeder table by that key (see fetch / deliver_inbound).
                 let repo = self.cfg.repo.clone();
                 let issue = self.cfg.issue;
                 let token = self.cfg.token();
@@ -357,7 +363,7 @@ impl BusNode {
         }
     }
 
-    async fn fetch(&self) {
+    async fn fetch(self: &Arc<Self>) {
         let repo = self.cfg.repo.clone();
         let issue = self.cfg.issue;
         let token = self.cfg.token();
@@ -396,14 +402,12 @@ impl BusNode {
                 continue;
             };
             let from = msg["from"].as_str().unwrap_or("").to_string();
-            let to = msg["to"].as_str().unwrap_or("");
-            // `to` may be tagged (`me#<nanos>`) — accept both forms.
-            let to_me = to == self.name
-                || to
-                    .strip_prefix(self.name.as_str())
-                    .map(|rest| rest.starts_with('#'))
-                    .unwrap_or(false);
-            if from.is_empty() || !to_me {
+            let to = msg["to"].as_str().unwrap_or("").to_string();
+            // `to` is a WIRE key we registered when we opened (or accepted)
+            // that virtual socket. Unknown keys are not ours. And our own
+            // flushes come back to us here too — never feed those into a
+            // wire or the initiator would read back its own ClientHello.
+            if from.is_empty() || to.is_empty() || from == self.name {
                 continue;
             }
             let Ok(bytes) = B64.decode(msg["frames"].as_str().unwrap_or("")) else {
@@ -415,33 +419,45 @@ impl BusNode {
                 continue;
             };
             for raw in frames {
-                self.deliver_inbound(&from, raw).await;
+                self.deliver_inbound(&to, &from, raw).await;
             }
         }
         self.last_comment.store(max_seen, Ordering::SeqCst);
     }
 
-    async fn deliver_inbound(&self, from: &str, raw: RawFrame) {
+    async fn deliver_inbound(self: &Arc<Self>, wire_key: &str, from: &str, raw: RawFrame) {
         let existing = {
             self.inbound
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
-                .get(from)
+                .get(wire_key)
                 .cloned()
         };
         if let Some(tx) = existing {
             let _ = tx.send(raw).await;
             return;
         }
-        // First contact from an unexpected sender: build a fresh wire and
-        // surface it to the accept loop (SIEVE1 responder side).
+        // Not a wire we opened. Accept it ONLY if it is a wire the remote
+        // dialed TO us — dial wires are named "{dialer}>{receiver}#tag".
+        // Anything else (a third party's wire we merely overheard on the
+        // shared bus) must be ignored, or every node would answer every
+        // handshake it sees.
+        let mine = format!("{}>{}#", from, self.name);
+        if !wire_key.starts_with(&mine) {
+            return;
+        }
+        // The REMOTE dialed us: build the accept-side wire.
+        // Build the accept-side wire: feeder → duplex (their frames), and
+        // duplex → outbox under the SAME wire key (our replies). This
+        // outbound direction is the responder's half of the socket.
         let (user, wire) = tokio::io::duplex(1 << 20);
         let (in_tx, in_rx) = mpsc::channel::<RawFrame>(256);
         self.inbound
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .insert(from.to_string(), in_tx.clone());
+            .insert(wire_key.to_string(), in_tx.clone());
         let (mut wire_rd, mut wire_wr) = tokio::io::split(wire);
+        // inbound pump: bus frames → duplex
         tokio::spawn(async move {
             let mut in_rx = in_rx;
             while let Some(raw) = in_rx.recv().await {
@@ -450,11 +466,29 @@ impl BusNode {
                 }
             }
         });
-        // Drain any stray bytes on the read side — inbound links are
-        // written to by the remote, we only read nothing here.
+        // outbound pump: responder's sealed frames → bus (queued under the
+        // same wire key so the initiator's feeder receives them)
+        let node = Arc::downgrade(self);
+        let key = wire_key.to_string();
         tokio::spawn(async move {
-            let mut sink = Vec::new();
-            let _ = wire_rd.read_to_end(&mut sink).await;
+            loop {
+                let mut lenbuf = [0u8; 4];
+                if wire_rd.read_exact(&mut lenbuf).await.is_err() {
+                    break;
+                }
+                let len = u32::from_be_bytes(lenbuf) as usize;
+                let mut body = vec![0u8; len];
+                if wire_rd.read_exact(&mut body).await.is_err() {
+                    break;
+                }
+                let mut framed = lenbuf.to_vec();
+                framed.extend_from_slice(&body);
+                if let Some(n) = node.upgrade() {
+                    n.queue(&key, framed);
+                } else {
+                    break;
+                }
+            }
         });
         let _ = in_tx.send(raw).await;
         let _ = self.accepts.send((from.to_string(), user)).await;

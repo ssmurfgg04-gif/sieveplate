@@ -45,6 +45,9 @@ impl InflightCall {
 
 struct Inner {
     host: String,
+    /// Periodic mesh-refresh interval (seconds). Default
+    /// [`Fabric::MESH_REFRESH_SECS`]; overridable for slow transports.
+    mesh_refresh_secs: std::sync::atomic::AtomicU64,
     /// In-flight REMOTE calls: pid → routing info. On a link death every
     /// call whose NEXT HOP was that link fails fast — locally when we
     /// originated the call, or via a `__fault` envelope routed back to the
@@ -89,6 +92,7 @@ impl Fabric {
         Fabric {
             inner: Arc::new(Inner {
                 host: host.clone(),
+                mesh_refresh_secs: std::sync::atomic::AtomicU64::new(Self::MESH_REFRESH_SECS),
                 inflight: RwLock::new(HashMap::new()),
                 links: RwLock::new(Vec::new()),
                 listener: RwLock::new(None),
@@ -147,12 +151,22 @@ impl Fabric {
     /// change (ADR-0006). Triggered updates converge in O(diameter); the
     /// periodic refresh is the safety net that bounds recovery if ANY
     /// triggered edge is ever missed (lost frame, unlucky crash timing).
+    /// Default: 2 s on TCP links. Slow store-and-forward transports (the
+    /// GitHub issue bus) override this via [`Fabric::set_mesh_refresh`].
     pub const MESH_REFRESH_SECS: u64 = 2;
 
     /// Register (or replace) a remote peer's frame sender. The peer joins
     /// the mesh at cost 1 and the full table is re-announced so both sides
     /// (and everyone else) converge. The first attach also starts the
     /// periodic refresh loop for this fabric.
+    /// Override the periodic mesh-refresh interval BEFORE the first peer
+    /// attaches (the loop starts once, lazily, on first attach).
+    pub fn set_mesh_refresh(&self, secs: u64) {
+        self.inner
+            .mesh_refresh_secs
+            .store(secs, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub fn attach_peer(&self, host: &str, tx: PeerTx) -> u64 {
         let conn = self
             .inner
@@ -171,9 +185,13 @@ impl Fabric {
             .swap(true, std::sync::atomic::Ordering::SeqCst)
         {
             let this = self.clone();
+            let secs = this
+                .inner
+                .mesh_refresh_secs
+                .load(std::sync::atomic::Ordering::SeqCst)
+                .max(1);
             tokio::spawn(async move {
-                let mut tick =
-                    tokio::time::interval(std::time::Duration::from_secs(Self::MESH_REFRESH_SECS));
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(secs));
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
                     tick.tick().await;

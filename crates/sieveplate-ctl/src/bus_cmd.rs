@@ -62,9 +62,16 @@ fn ledger_port(host: &str) -> Port {
 }
 
 /// Build + sign a receipt comment body (Ed25519 + ML-DSA over the message).
+///
+/// The receipt carries the signer's PUBLIC KEY and the FINGERPRINTS of its
+/// direct (handshaked) neighbors. This gives the aggregator a transitive
+/// trust path: hosts it pinned directly are verified against the pins;
+/// hosts two hops away (gamma, for alpha) are verified with the key
+/// endorsed by a pinned neighbor whose own receipt lists that fingerprint.
 fn receipt_body(
     args: &BusArgs,
     identity: &sieveplate_fabric::HostIdentity,
+    neighbors: &[(String, String)], // (host, fingerprint)
     pass: bool,
     note: &str,
 ) -> String {
@@ -83,6 +90,7 @@ fn receipt_body(
         .expect("pq sign")
         .encode()
         .to_vec();
+    let pubk = identity.public();
     format!(
         "SIEVE-RECEIPT {}",
         json!({
@@ -94,6 +102,12 @@ fn receipt_body(
             "msg": msg,
             "ed": B64.encode(ed_sig),
             "pq": B64.encode(pq_sig),
+            "pub_ed": B64.encode(pubk.ed_public),
+            "pub_pq": B64.encode(&pubk.pq_vk),
+            "fingerprint": sieveplate_fabric::fingerprint(&pubk),
+            "neighbors": neighbors.iter().map(|(h, f)| json!({
+                "host": h, "fingerprint": f
+            })).collect::<Vec<_>>(),
         })
     )
 }
@@ -165,11 +179,23 @@ pub async fn run(args: BusArgs) -> Result<()> {
     };
     let _ = &agent;
 
-    // Dial my links (retry until half the window is gone).
+    // The bus is a SLOW transport: widen the periodic mesh refresh so the
+    // shared issue is not flooded with announcements (API rate limits).
+    host.fabric.set_mesh_refresh(30);
+
+    // Role scripts:
+    //   alpha : dials beta, waits for a mesh route to gamma, writes a value
+    //           into gamma's ledger, reads it back, verifies SIGNED receipts
+    //           from every host, posts the verdict, exits with it.
+    //   beta  : dials both, relays until alpha posts the verdict.
+    //   gamma : dials beta, waits for the value, posts a receipt, waits for
+    //           the verdict.
+
+    // Dial my links (retry until the window mostly closes).
     let mut established: Vec<String> = Vec::new();
     for peer in &args.links {
         let mut ok = false;
-        while !ok && Instant::now() < deadline - Duration::from_secs(args.window / 2).min(Duration::from_secs(30)) {
+        while !ok && Instant::now() < deadline - Duration::from_secs(30) {
             let t = Instant::now();
             let res = tokio::time::timeout(
                 Duration::from_secs(60),
@@ -229,6 +255,14 @@ async fn run_role(
     deadline: Instant,
 ) -> i32 {
     let identity = link.identity.clone();
+
+    // alpha drives the demo and exits as soon as the verdict is in. The
+    // other roles MUST NOT exit early: they are the relay and the receiver
+    // for the whole demo (a node that posts its receipt and quits leaves
+    // the caller talking to a dead relay).
+    if args.role != "alpha" {
+        return run_support_role(args, host, node, link, identity, deadline).await;
+    }
 
     // ---- role-specific success conditions ------------------------------
     match args.role.as_str() {
@@ -305,13 +339,39 @@ async fn run_role(
                     expected.len() + 1
                 );
                 println!("BUS-DEMO ALL-GREEN topology=alpha-beta-gamma multihop=true");
+                let _ = node
+                    .post("SIEVE-VERDICT ALL-GREEN run-complete=true".to_string())
+                    .await;
                 0
             } else {
                 println!("BUS-DEMO FAIL reason=missing-receipts got={verified:?}");
+                let _ = node
+                    .post("SIEVE-VERDICT FAIL reason=missing-receipts".to_string())
+                    .await;
                 6
             }
         }
 
+        other => {
+            eprintln!("unknown role '{other}' (alpha|beta|gamma)");
+            2
+        }
+    }
+}
+
+/// beta / gamma: do their role-specific wait, post a signed receipt, then
+/// stay on the bus relaying until alpha posts the verdict (or the window
+/// closes). Exit 0 only if their own success condition held.
+async fn run_support_role(
+    args: BusArgs,
+    host: std::sync::Arc<Host>,
+    node: std::sync::Arc<BusNode>,
+    link: LinkConfig,
+    identity: sieveplate_fabric::HostIdentity,
+    deadline: Instant,
+) -> i32 {
+    let neighbors: Vec<(String, String)> = link_neighbors(&link);
+    let pass = match args.role.as_str() {
         // gamma: wait until the multi-hop value lands in MY ledger.
         "gamma" => {
             let mut value = String::new();
@@ -335,38 +395,65 @@ async fn run_role(
             }
             if value.is_empty() {
                 println!("BUS-DEMO FAIL reason=never-received-greeting");
-                return 7;
+                false
+            } else {
+                println!("BUS-DEMO GAMMA-RECEIVED value={value}");
+                let body = receipt_body(&args, &identity, &neighbors, true, &format!("received {value}"));
+                let _ = node.post(body).await;
+                println!("BUS-DEMO GAMMA-RECEIPT-POSTED");
+                true
             }
-            println!("BUS-DEMO GAMMA-RECEIVED value={value}");
-            let body = receipt_body(&args, &identity, true, &format!("received {value}"));
-            let _ = node.post(body).await;
-            println!("BUS-DEMO GAMMA-RECEIPT-POSTED");
-            0
         }
-
         // beta: relay; receipt once both links are established.
         "beta" => {
-            // links were already established above (run() bails otherwise)
             tokio::time::sleep(Duration::from_secs(5)).await;
             let body = receipt_body(
                 &args,
                 &identity,
+                &neighbors,
                 true,
                 &format!("links up: {}", args.links.join(",")),
             );
             let _ = node.post(body).await;
             println!("BUS-DEMO BETA-RECEIPT-POSTED links={:?}", args.links);
-            0
+            true
         }
-        other => {
-            eprintln!("unknown role '{other}' (alpha|beta|gamma)");
-            2
+        _ => false,
+    };
+
+    // Stay on the bus until alpha posts the verdict (we are the relay).
+    while Instant::now() < deadline {
+        for body in node.fetch_comment_bodies().await {
+            if body.starts_with("SIEVE-VERDICT") {
+                println!("{body}");
+                if body.contains("ALL-GREEN") {
+                    return if pass { 0 } else { 1 };
+                }
+                return 1;
+            }
         }
+        tokio::time::sleep(Duration::from_secs(5)).await;
     }
+    println!("BUS-DEMO FAIL reason=window-closed-before-verdict");
+    1
 }
 
-/// Poll the bus for SIEVE-RECEIPT comments and verify each signature
-/// against the PINNED peer key (pinned during the SIEVE1 handshake).
+/// Direct neighbors of this node (handshaked peers) with their key
+/// fingerprints — the endorsement list a receipt publishes.
+fn link_neighbors(link: &LinkConfig) -> Vec<(String, String)> {
+    link.peers
+        .list()
+        .into_iter()
+        .map(|(name, rec)| (name, rec.fingerprint))
+        .collect()
+}
+
+/// Poll the bus for SIEVE-RECEIPT comments and verify signatures in two
+/// passes:
+///   1. hosts we PINNED during our own SIEVE1 handshakes;
+///   2. hosts endorsed by an already-verified receipt whose `neighbors`
+///      list carries the same key fingerprint (transitive trust, one hop
+///      at a time — gamma reaches alpha through beta).
 async fn verify_receipts(
     node: &std::sync::Arc<BusNode>,
     link: &LinkConfig,
@@ -374,8 +461,10 @@ async fn verify_receipts(
     deadline: Instant,
 ) -> Vec<String> {
     let mut seen: Vec<String> = Vec::new();
+    // verified host → its published key material
+    let mut trusted_keys: std::collections::HashMap<String, (Vec<u8>, Vec<u8>, String)> =
+        std::collections::HashMap::new(); // host → (ed_pub, pq_vk, fingerprint)
     while Instant::now() < deadline && seen.len() < expected.len() {
-        // Re-fetch the bus page; receipt comments carry marker SIEVE-RECEIPT.
         let bodies = node.fetch_comment_bodies().await;
         for body in bodies {
             let Some(json_part) = body.strip_prefix("SIEVE-RECEIPT") else {
@@ -391,26 +480,80 @@ async fn verify_receipts(
             let Some(msg) = v["msg"].as_str().map(String::from) else {
                 continue;
             };
-            let ed = v["ed"].as_str().and_then(|s| B64.decode(s).ok());
-            let pq = v["pq"].as_str().and_then(|s| B64.decode(s).ok());
-            let (Some(ed), Some(pq)) = (ed, pq) else {
-                continue;
-            };            let Some(record) = link.peers.get(&host) else {
-                println!("RECEIPT-REJECT host={host} reason=not-pinned");
+            let (Some(ed), Some(pq)) = (
+                v["ed"].as_str().and_then(|s| B64.decode(s).ok()),
+                v["pq"].as_str().and_then(|s| B64.decode(s).ok()),
+            ) else {
                 continue;
             };
-            let pubk = sieveplate_fabric::HostPublic {
+            let claimed_fp = v["fingerprint"].as_str().unwrap_or("").to_string();
+            let pub_ed = v["pub_ed"].as_str().and_then(|s| B64.decode(s).ok());
+            let pub_pq = v["pub_pq"].as_str().and_then(|s| B64.decode(s).ok());
+
+            // Pass 1: directly pinned?
+            let pinned = link.peers.get(&host).map(|rec| sieveplate_fabric::HostPublic {
                 host: host.clone(),
-                ed_public: record.ed_public,
-                pq_vk: record.pq_vk.clone(),
-            };
-            match pubk.verify(msg.as_bytes(), &ed, &pq) {
-                Ok(()) => {
-                    println!("RECEIPT-OK host={host} note={}", v["note"].as_str().unwrap_or(""));
-                    seen.push(host);
+                ed_public: rec.ed_public,
+                pq_vk: rec.pq_vk.clone(),
+            });
+            let pubk = if let Some(pubk) = pinned {
+                if pubk.verify(msg.as_bytes(), &ed, &pq).is_err() {
+                    println!("RECEIPT-REJECT host={host} reason=bad-signature-vs-pin");
+                    continue;
                 }
-                Err(e) => println!("RECEIPT-REJECT host={host} err={e}"),
-            }
+                pubk
+            } else {
+                // Pass 2: endorsed by a verified neighbor?
+                let mut endorsement: Option<(String, Vec<u8>, Vec<u8>)> = None;
+                if let (Some(ed_pub), Some(pq_vk)) = (&pub_ed, &pub_pq) {
+                    for (verifier, (v_ed, v_pq, _)) in &trusted_keys {
+                        let bodies2 = node.fetch_comment_bodies().await;
+                        let _ = &bodies2;
+                        // neighbors of the VERIFIER's receipt list `host`
+                        let endorsed = bodies2.iter().any(|b2| {
+                            let Some(j2) = b2.strip_prefix("SIEVE-RECEIPT") else {
+                                return false;
+                            };
+                            let Ok(v2) = serde_json::from_str::<serde_json::Value>(j2.trim())
+                            else {
+                                return false;
+                            };
+                            v2["host"].as_str() == Some(verifier.as_str())
+                                && v2["neighbors"].as_array().map(|a| {
+                                    a.iter().any(|n| {
+                                        n["host"].as_str() == Some(host.as_str())
+                                            && n["fingerprint"].as_str() == Some(claimed_fp.as_str())
+                                    })
+                                }) == Some(true)
+                        });
+                        if endorsed {
+                            endorsement = Some((verifier.clone(), ed_pub.clone(), pq_vk.clone()));
+                            break;
+                        }
+                    }
+                }
+                let Some((via, ed_pub, pq_vk)) = endorsement else {
+                    println!("RECEIPT-REJECT host={host} reason=not-pinned-and-not-endorsed");
+                    continue;
+                };
+                let pubk = sieveplate_fabric::HostPublic {
+                    host: host.clone(),
+                    ed_public: ed_pub.clone().try_into().unwrap_or([0u8; 32]),
+                    pq_vk: pq_vk.clone(),
+                };
+                if pubk.verify(msg.as_bytes(), &ed, &pq).is_err() {
+                    println!("RECEIPT-REJECT host={host} reason=bad-signature-vs-endorsement");
+                    continue;
+                }
+                println!("RECEIPT-ENDORSED-BY host={host} via={via} fp={claimed_fp}");
+                pubk
+            };
+            println!("RECEIPT-OK host={host} note={}", v["note"].as_str().unwrap_or(""));
+            trusted_keys.insert(
+                host.clone(),
+                (pubk.ed_public.to_vec(), pubk.pq_vk.clone(), claimed_fp),
+            );
+            seen.push(host);
         }
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
