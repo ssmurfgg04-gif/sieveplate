@@ -60,7 +60,15 @@ struct Inner {
     /// Per-cell proxies (process cells): raw envelope senders keyed
     /// "vat/cell". Take precedence over whole-vat mailboxes.
     proxies: RwLock<HashMap<String, mpsc::Sender<Envelope>>>,
-    peers: RwLock<HashMap<String, PeerTx>>,
+    /// Direct peer links: name → (frame sender, connection id). The id
+    /// makes disconnect handling generation-aware: a LATE EOF from a dead
+    /// socket must never erase the state of a NEWER link to the same peer
+    /// (same name — hosts relink under one name), so pumps exit through
+    /// `peer_disconnected_conn` and only the CURRENT connection's death
+    /// counts.
+    peers: RwLock<HashMap<String, (PeerTx, u64)>>,
+    /// Monotonic connection-id source.
+    conn_seq: std::sync::atomic::AtomicU64,
     promises: Promises,
     /// Multi-hop routing table (ADR-0006): dest host → next hop + cost.
     mesh: RouteTable,
@@ -85,6 +93,7 @@ impl Fabric {
                 locals: RwLock::new(HashMap::new()),
                 proxies: RwLock::new(HashMap::new()),
                 peers: RwLock::new(HashMap::new()),
+                conn_seq: std::sync::atomic::AtomicU64::new(1),
                 promises,
                 mesh: RouteTable::new(host.clone()),
             }),
@@ -134,14 +143,19 @@ impl Fabric {
     /// Register (or replace) a remote peer's frame sender. The peer joins
     /// the mesh at cost 1 and the full table is re-announced so both sides
     /// (and everyone else) converge.
-    pub fn attach_peer(&self, host: &str, tx: PeerTx) {
+    pub fn attach_peer(&self, host: &str, tx: PeerTx) -> u64 {
+        let conn = self
+            .inner
+            .conn_seq
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner
             .peers
             .write()
             .unwrap_or_else(|p| p.into_inner())
-            .insert(host.to_string(), tx);
+            .insert(host.to_string(), (tx, conn));
         self.inner.mesh.add_direct(host);
         self.spawn_announce(None);
+        conn
     }
 
     /// Send a control frame DIRECTLY to a peer (bypasses the route table —
@@ -158,7 +172,7 @@ impl Fabric {
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .get(peer)
-            .cloned();
+            .map(|(tx, _)| tx.clone());
         if let Some(tx) = tx {
             tokio::spawn(async move {
                 let _ = tx.send(bytes).await;
@@ -206,6 +220,20 @@ impl Fabric {
             .remove(host);
     }
 
+    /// Drop the peer entry ONLY if it is still the connection that died
+    /// (`conn` matches). Returns true when the entry was removed — i.e.
+    /// this death is the CURRENT link's and the mesh must react.
+    pub fn drop_peer_if_current(&self, host: &str, conn: u64) -> bool {
+        let mut peers = self.inner.peers.write().unwrap_or_else(|p| p.into_inner());
+        match peers.get(host) {
+            Some((_, cur)) if *cur == conn => {
+                peers.remove(host);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Crash detection: the link to `host` broke. Every in-flight call
     /// routed over that link fails immediately — a caller waits for an
     /// ANSWER or a FAILURE, never for a timeout that hides the difference.
@@ -216,6 +244,27 @@ impl Fabric {
     /// link.
     pub fn peer_disconnected(&self, host: &str) {
         self.drop_peer(host);
+        self.handle_disconnect(host);
+    }
+
+    /// The pump for connection `conn` to `host` died. If a newer
+    /// connection to the same host has already replaced this entry, the
+    /// death is STALE — the mesh keeps its routes and in-flight calls
+    /// (they ride the new link). Otherwise this is the current link's
+    /// death: fail calls, withdraw routes, poison outward.
+    pub fn peer_disconnected_conn(&self, host: &str, conn: u64) {
+        if !self.drop_peer_if_current(host, conn) {
+            tracing::debug!(
+                peer = %host,
+                conn,
+                "stale link death ignored — newer connection already in place"
+            );
+            return;
+        }
+        self.handle_disconnect(host);
+    }
+
+    fn handle_disconnect(&self, host: &str) {
         let self_host = self.inner.host.clone();
         let mut inflight = self
             .inner
@@ -424,7 +473,7 @@ impl Fabric {
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .get(&host_name)
-            .cloned();
+            .map(|(tx, _)| tx.clone());
         let (tx, used_hop) = match direct {
             Some(tx) => (Some(tx), host_name.clone()),
             None => match self.inner.mesh.next_hop(&host_name) {
@@ -435,7 +484,7 @@ impl Fabric {
                         .read()
                         .unwrap_or_else(|p| p.into_inner())
                         .get(&hop)
-                        .cloned();
+                        .map(|(tx, _)| tx.clone());
                     (tx, hop)
                 }
                 None => (None, host_name.clone()),

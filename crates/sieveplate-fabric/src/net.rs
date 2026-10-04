@@ -158,7 +158,7 @@ async fn pump(
     tx: PeerTx,
     attach_now: String,
 ) {
-    fabric.attach_peer(&attach_now, tx.clone());
+    let mut my_conn = fabric.attach_peer(&attach_now, tx.clone());
     let mut peer_name = attach_now;
     let mut raw = [0u8; 4];
     loop {
@@ -186,7 +186,7 @@ async fn pump(
                     if let Ok(name) = String::from_utf8(env.payload) {
                         if !name.is_empty() && name != peer_name {
                             fabric.drop_peer(&peer_name);
-                            fabric.attach_peer(&name, tx.clone());
+                            my_conn = fabric.attach_peer(&name, tx.clone());
                             peer_name = name;
                         }
                     }
@@ -220,9 +220,10 @@ async fn pump(
             }
         }
     }
-    // Link down (EOF/tamper/error): treat as peer crash under the name the
-    // rest of the mesh knows us to route by.
-    fabric.peer_disconnected(&peer_name);
+    // Link down (EOF/tamper/error): treat as a peer crash under the name
+    // the mesh knows — but ONLY if this connection is still the current
+    // one for that name (a relinked peer supersedes a dead old socket).
+    fabric.peer_disconnected_conn(&peer_name, my_conn);
 }
 
 /// Inbound: SIEVE1 responder handshake, then hello + sealed frame pump.
