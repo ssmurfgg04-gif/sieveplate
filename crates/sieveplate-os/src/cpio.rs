@@ -38,18 +38,23 @@ impl<W: Write> CpioWriter<W> {
 
     pub fn write_entry(&mut self, e: &Entry) -> Result<()> {
         let (mode, nlink, filesize, data): (u32, u32, u32, &[u8]) = match &e.kind {
-            EntryKind::File { data, mode } => (0o100000 | (mode & 0o7777), 1, data.len() as u32, data),
+            EntryKind::File { data, mode } => {
+                (0o100000 | (mode & 0o7777), 1, data.len() as u32, data)
+            }
             EntryKind::Dir { mode } => (0o040000 | (mode & 0o7777), 2, 0, &[]),
-            EntryKind::Symlink { target } => (0o120000 | 0o777, 1, target.len() as u32, target.as_bytes()),
+            EntryKind::Symlink { target } => {
+                (0o120000 | 0o777, 1, target.len() as u32, target.as_bytes())
+            }
         };
         let name = e.name.as_bytes();
         let ino = self.next_ino();
         let uid = 0u32;
         let gid = 0u32;
         let mtime = 0u32; // reproducible images
-        // file alignment (4 bytes) BEFORE the header
+                          // file alignment (4 bytes) BEFORE the header
         self.pad4()?;
-        let header = format!(
+        let header =
+            format!(
             "070701{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}",
             ino, mode, uid, gid, nlink, mtime, filesize, 0, // devmajor
             0,  // devminor

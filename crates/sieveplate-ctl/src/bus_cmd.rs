@@ -151,7 +151,8 @@ pub async fn run(args: BusArgs) -> Result<()> {
     .await?;
 
     // The bus: agent + accept loop.
-    let (accept_tx, accept_rx) = tokio::sync::mpsc::channel::<(String, tokio::io::DuplexStream)>(64);
+    let (accept_tx, accept_rx) =
+        tokio::sync::mpsc::channel::<(String, tokio::io::DuplexStream)>(64);
     let node = BusNode::new(
         args.name.clone(),
         BusConfig {
@@ -237,8 +238,15 @@ pub async fn run(args: BusArgs) -> Result<()> {
         .cloned();
 
     let host = std::sync::Arc::new(host);
-    let exit_code =
-        run_role(args, host.clone(), node.clone(), link, remote_target, deadline).await;
+    let exit_code = run_role(
+        args,
+        host.clone(),
+        node.clone(),
+        link,
+        remote_target,
+        deadline,
+    )
+    .await;
 
     node.stop();
     host.shutdown().await;
@@ -289,7 +297,9 @@ async fn run_role(
 
             // Multi-hop write + read-back.
             let value = format!("hello-from-{}-via-mesh-{}", args.name, now());
-            let payload = json!({"k": "greeting", "v": value}).to_string().into_bytes();
+            let payload = json!({"k": "greeting", "v": value})
+                .to_string()
+                .into_bytes();
             let put = host
                 .fabric
                 .call(
@@ -314,7 +324,10 @@ async fn run_role(
                 .await;
             match got {
                 Ok(v) if String::from_utf8_lossy(&v) == value => {
-                    println!("BUS-DEMO PASS multi-hop {0}->{target} value={value}", args.name);
+                    println!(
+                        "BUS-DEMO PASS multi-hop {0}->{target} value={value}",
+                        args.name
+                    );
                 }
                 other => {
                     println!(
@@ -398,7 +411,13 @@ async fn run_support_role(
                 false
             } else {
                 println!("BUS-DEMO GAMMA-RECEIVED value={value}");
-                let body = receipt_body(&args, &identity, &neighbors, true, &format!("received {value}"));
+                let body = receipt_body(
+                    &args,
+                    &identity,
+                    &neighbors,
+                    true,
+                    &format!("received {value}"),
+                );
                 let _ = node.post(body).await;
                 println!("BUS-DEMO GAMMA-RECEIPT-POSTED");
                 true
@@ -491,11 +510,14 @@ async fn verify_receipts(
             let pub_pq = v["pub_pq"].as_str().and_then(|s| B64.decode(s).ok());
 
             // Pass 1: directly pinned?
-            let pinned = link.peers.get(&host).map(|rec| sieveplate_fabric::HostPublic {
-                host: host.clone(),
-                ed_public: rec.ed_public,
-                pq_vk: rec.pq_vk.clone(),
-            });
+            let pinned = link
+                .peers
+                .get(&host)
+                .map(|rec| sieveplate_fabric::HostPublic {
+                    host: host.clone(),
+                    ed_public: rec.ed_public,
+                    pq_vk: rec.pq_vk.clone(),
+                });
             let pubk = if let Some(pubk) = pinned {
                 if pubk.verify(msg.as_bytes(), &ed, &pq).is_err() {
                     println!("RECEIPT-REJECT host={host} reason=bad-signature-vs-pin");
@@ -522,7 +544,8 @@ async fn verify_receipts(
                                 && v2["neighbors"].as_array().map(|a| {
                                     a.iter().any(|n| {
                                         n["host"].as_str() == Some(host.as_str())
-                                            && n["fingerprint"].as_str() == Some(claimed_fp.as_str())
+                                            && n["fingerprint"].as_str()
+                                                == Some(claimed_fp.as_str())
                                     })
                                 }) == Some(true)
                         });
@@ -548,7 +571,10 @@ async fn verify_receipts(
                 println!("RECEIPT-ENDORSED-BY host={host} via={via} fp={claimed_fp}");
                 pubk
             };
-            println!("RECEIPT-OK host={host} note={}", v["note"].as_str().unwrap_or(""));
+            println!(
+                "RECEIPT-OK host={host} note={}",
+                v["note"].as_str().unwrap_or("")
+            );
             trusted_keys.insert(
                 host.clone(),
                 (pubk.ed_public.to_vec(), pubk.pq_vk.clone(), claimed_fp),

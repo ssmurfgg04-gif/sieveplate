@@ -9,14 +9,8 @@ use sieveplate_os as os;
 use std::path::PathBuf;
 
 fn main() -> anyhow::Result<()> {
-    let argv0 = std::env::args()
-        .next()
-        .unwrap_or_else(|| "sieve-os".into());
-    let base = argv0
-        .rsplit('/')
-        .next()
-        .unwrap_or("sieve-os")
-        .to_string();
+    let argv0 = std::env::args().next().unwrap_or_else(|| "sieve-os".into());
+    let base = argv0.rsplit('/').next().unwrap_or("sieve-os").to_string();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -69,7 +63,9 @@ fn top_cli(args: &[String]) -> anyhow::Result<()> {
         _ => {
             eprintln!("sieve-os — the sieveplate OS binary");
             eprintln!();
-            eprintln!("  sieve-os init              (run as PID 1 — normally via the /init symlink)");
+            eprintln!(
+                "  sieve-os init              (run as PID 1 — normally via the /init symlink)"
+            );
             eprintln!("  sieve-os mkimage --out DIR --init PATH [--refetch]");
             eprintln!("  spore install <pkgs...> --root / [--cache DIR] [--mirror URL]");
             eprintln!("  spore list --root /");

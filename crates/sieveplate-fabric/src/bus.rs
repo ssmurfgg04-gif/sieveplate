@@ -66,8 +66,15 @@ impl BusConfig {
 // GitHub REST plumbing (blocking; driven from tokio via spawn_blocking)
 // ---------------------------------------------------------------------------
 
-fn api_get(repo: &str, issue: u64, token: &str, page: u64) -> Result<Vec<serde_json::Value>, String> {
-    let url = format!("https://api.github.com/repos/{repo}/issues/{issue}/comments?per_page=100&page={page}");
+fn api_get(
+    repo: &str,
+    issue: u64,
+    token: &str,
+    page: u64,
+) -> Result<Vec<serde_json::Value>, String> {
+    let url = format!(
+        "https://api.github.com/repos/{repo}/issues/{issue}/comments?per_page=100&page={page}"
+    );
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(20))
         .build();
@@ -110,7 +117,10 @@ fn api_post(repo: &str, issue: u64, token: &str, body: &str) -> Result<u64, Stri
                     std::thread::sleep(Duration::from_secs(2));
                     continue;
                 }
-                return Err(format!("POST comment: HTTP {code}: {}", truncate(&text, 300)));
+                return Err(format!(
+                    "POST comment: HTTP {code}: {}",
+                    truncate(&text, 300)
+                ));
             }
             Err(e) => {
                 if attempt < 2 {
@@ -534,8 +544,7 @@ pub fn serve_over_bus(
             let task_link = link.clone();
             let h = tokio::spawn(async move {
                 let (rd, wr) = tokio::io::split(user);
-                let _ =
-                    crate::net::establish_inbound(task_fabric, rd, wr, task_link, from).await;
+                let _ = crate::net::establish_inbound(task_fabric, rd, wr, task_link, from).await;
             });
             fabric.track_link(h);
         }

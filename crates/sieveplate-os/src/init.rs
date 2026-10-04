@@ -26,7 +26,10 @@ pub fn main() -> Result<()> {
     let _ = std::fs::write("/proc/sys/kernel/printk", "4 4 1 7");
 
     set_hostname("sieveplate");
-    println!("OS-UP pid1={} mounts=proc,sys,dev,tmp,run", std::process::id());
+    println!(
+        "OS-UP pid1={} mounts=proc,sys,dev,tmp,run",
+        std::process::id()
+    );
 
     // Zombie reaping thread: PID 1 must never leak children.
     std::thread::spawn(|| unsafe {
@@ -55,6 +58,10 @@ pub fn main() -> Result<()> {
     }
 
     // ---- 4. SIEVE1 secure link on loopback TCP ----------------------------
+    // bring loopback up FIRST — 127.0.0.1 is not bound on a fresh boot
+    let _ = std::process::Command::new("/bin/busybox")
+        .args(["ifconfig", "lo", "127.0.0.1", "up"])
+        .status();
     let sieve_ok = rt.block_on(sieve1_loopback());
     if sieve_ok {
         println!("SIEVE1-LINK-OK transport=tcp-loopback crypto=Ed25519+ML-DSA-65+X25519+ML-KEM-768+ChaCha20-Poly1305");
@@ -117,10 +124,21 @@ pub fn main() -> Result<()> {
 fn mount(target: &str, fstype: &str, label: &str) {
     let c_target = std::ffi::CString::new(target).unwrap();
     let c_fs = std::ffi::CString::new(fstype).unwrap();
-    let rc = unsafe { libc::mount(c_fs.as_ptr(), c_target.as_ptr(), c_fs.as_ptr(), 0, std::ptr::null()) };
+    let rc = unsafe {
+        libc::mount(
+            c_fs.as_ptr(),
+            c_target.as_ptr(),
+            c_fs.as_ptr(),
+            0,
+            std::ptr::null(),
+        )
+    };
     if rc != 0 {
         // /dev might already be mounted by the kernel for initramfs
-        println!("mount-warn target={target} fs={label} rc={rc} errno={}", unsafe { *libc::__errno_location() });
+        println!(
+            "mount-warn target={target} fs={label} rc={rc} errno={}",
+            unsafe { *libc::__errno_location() }
+        );
     }
 }
 
@@ -136,9 +154,13 @@ fn bring_up_network() {
     // 1. modules (order.txt = deps first, written by mkimage)
     if let Ok(order) = std::fs::read_to_string("/modules/order.txt") {
         for ko in order.lines().map(|l| l.trim()).filter(|l| !l.is_empty()) {
-            let st = std::process::Command::new("/bin/busybox").args(["insmod", ko]).output();
+            let st = std::process::Command::new("/bin/busybox")
+                .args(["insmod", ko])
+                .output();
             match st {
-                Ok(o) if o.status.success() => println!("MOD-UP {}", ko.rsplit('/').next().unwrap_or(ko)),
+                Ok(o) if o.status.success() => {
+                    println!("MOD-UP {}", ko.rsplit('/').next().unwrap_or(ko))
+                }
                 _ => {} // already loaded / builtin — fine
             }
         }
@@ -173,7 +195,19 @@ fn bring_up_network() {
     let _ = std::fs::create_dir_all("/etc");
     let _ = std::fs::write("/etc/resolv.conf", "nameserver 10.0.2.3\n");
     let out = std::process::Command::new("/bin/busybox")
-        .args(["udhcpc", "-i", &iface, "-s", "/usr/share/udhcpc/default.script", "-n", "-q", "-t", "6", "-T", "2"])
+        .args([
+            "udhcpc",
+            "-i",
+            &iface,
+            "-s",
+            "/usr/share/udhcpc/default.script",
+            "-n",
+            "-q",
+            "-t",
+            "6",
+            "-T",
+            "2",
+        ])
         .output();
     let got_ip = out
         .ok()
@@ -228,11 +262,21 @@ async fn cell_smoke() -> bool {
     let payload = format!(r#"{{"k":"boot","v":"{}"}}"#, "sieveplate-os");
     let put = host
         .fabric
-        .call(port.clone(), "put", payload.into_bytes(), std::time::Duration::from_secs(10))
+        .call(
+            port.clone(),
+            "put",
+            payload.into_bytes(),
+            std::time::Duration::from_secs(10),
+        )
         .await;
     let get = host
         .fabric
-        .call(port, "get", b"boot".to_vec(), std::time::Duration::from_secs(10))
+        .call(
+            port,
+            "get",
+            b"boot".to_vec(),
+            std::time::Duration::from_secs(10),
+        )
         .await;
     let ok = matches!(&get, Ok(v) if String::from_utf8_lossy(v) == "sieveplate-os") && put.is_ok();
     host.shutdown().await;

@@ -528,7 +528,11 @@ async fn linux_suite(rows: &mut Vec<Row>) -> Result<()> {
             let Ok(sealed) = chan_b.tx.seal(&plain) else {
                 break;
             };
-            if b_wr2.write_all(&(sealed.len() as u32).to_be_bytes()).await.is_err() {
+            if b_wr2
+                .write_all(&(sealed.len() as u32).to_be_bytes())
+                .await
+                .is_err()
+            {
                 break;
             }
             if b_wr2.write_all(&sealed).await.is_err() {
@@ -579,9 +583,7 @@ async fn linux_suite(rows: &mut Vec<Row>) -> Result<()> {
 /// Print honest side-by-side comparisons between sieveplate rows and the
 /// standard-Linux rows measured in the same run.
 fn print_comparison(rows: &[Row]) {
-    let find = |needle: &str| -> Option<&Row> {
-        rows.iter().find(|r| r.label.contains(needle))
-    };
+    let find = |needle: &str| -> Option<&Row> { rows.iter().find(|r| r.label.contains(needle)) };
     let pairs = [
         ("turn: call round-trip (in-proc)", "linux: pipe round-trip"),
         ("jail: process cell spawn", "linux: fork+exec"),

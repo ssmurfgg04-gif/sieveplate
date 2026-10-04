@@ -265,7 +265,11 @@ fn ver_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     std::cmp::Ordering::Equal
 }
 
-fn term_satisfied(term: &Term, installed: &InstalledDb, repos: &HashMap<String, PackageInfo>) -> bool {
+fn term_satisfied(
+    term: &Term,
+    installed: &InstalledDb,
+    repos: &HashMap<String, PackageInfo>,
+) -> bool {
     for (name, pkg) in &installed.packages {
         if name == &term.name {
             if let Some((op, v)) = &term.op {
@@ -371,10 +375,7 @@ pub fn resolve(
         for c in &pkg.conflicts {
             let ct = parse_term(c);
             if term_satisfied_pub(&ct, virt, repos) {
-                bail!(
-                    "'{}' conflicts with installed/provided '{c}'",
-                    pkg.name
-                );
+                bail!("'{}' conflicts with installed/provided '{c}'", pkg.name);
             }
         }
         for d in pkg.depends.clone() {
@@ -405,7 +406,15 @@ pub fn resolve(
     }
 
     for r in roots {
-        visit(r, repos, &mut virtual_installed, &mut visited, &mut in_progress, &mut order, 0)?;
+        visit(
+            r,
+            repos,
+            &mut virtual_installed,
+            &mut visited,
+            &mut in_progress,
+            &mut order,
+            0,
+        )?;
     }
     Ok(order)
 }
@@ -414,14 +423,14 @@ pub fn resolve(
 // Download + extract
 // ---------------------------------------------------------------------------
 
-pub fn fetch_package(
-    pkg: &PackageInfo,
-    cache: &Path,
-    mirror: &str,
-) -> Result<PathBuf> {
+pub fn fetch_package(pkg: &PackageInfo, cache: &Path, mirror: &str) -> Result<PathBuf> {
     std::fs::create_dir_all(cache)?;
     let local = cache.join(&pkg.filename);
-    if local.exists() && std::fs::metadata(&local).map(|m| m.len() > 0).unwrap_or(false) {
+    if local.exists()
+        && std::fs::metadata(&local)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
+    {
         return Ok(local);
     }
     let url = format!(
@@ -475,6 +484,20 @@ pub fn extract_package(pkg_path: &Path, root: &Path) -> Result<Vec<String>> {
             }
             tar::EntryType::Symlink => {
                 if let Some(link) = entry.link_name()? {
+                    // Arch's `filesystem` package wants /bin -> usr/bin and
+                    // friends. In a live initramfs those paths are REAL
+                    // directories holding our runtime — converting them to
+                    // symlinks would break the running OS (and fails with
+                    // EEXIST anyway). Skip conflicts honestly.
+                    let conflict = dest.is_dir() || dest.symlink_metadata().is_ok();
+                    if conflict {
+                        println!(
+                            "spore: skipping {} -> {} (destination in use by the runtime)",
+                            name,
+                            link.display()
+                        );
+                        continue;
+                    }
                     let _ = std::fs::remove_file(&dest);
                     #[cfg(unix)]
                     std::os::unix::fs::symlink(&link, &dest)?;

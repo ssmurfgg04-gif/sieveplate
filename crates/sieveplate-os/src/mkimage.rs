@@ -44,7 +44,23 @@ pub fn mkimage(opts: MkimageOpts) -> Result<()> {
     std::fs::create_dir_all(&cache)?;
     let staging = opts.out.join("staging");
     let _ = std::fs::remove_dir_all(&staging);
-    let dirs = ["bin", "sbin", "usr/bin", "usr/sbin", "etc", "proc", "sys", "dev", "tmp", "run", "var/cache/spore", "modules", "root", "home", "mnt"];
+    let dirs = [
+        "bin",
+        "sbin",
+        "usr/bin",
+        "usr/sbin",
+        "etc",
+        "proc",
+        "sys",
+        "dev",
+        "tmp",
+        "run",
+        "var/cache/spore",
+        "modules",
+        "root",
+        "home",
+        "mnt",
+    ];
     for d in dirs {
         std::fs::create_dir_all(staging.join(d))?;
     }
@@ -195,10 +211,7 @@ pub fn mkimage(opts: MkimageOpts) -> Result<()> {
             let mut out = Vec::new();
             let needle = b"depends=";
             let mut i = 0;
-            while let Some(pos) = ko[i..]
-                .windows(needle.len())
-                .position(|w| w == *needle)
-            {
+            while let Some(pos) = ko[i..].windows(needle.len()).position(|w| w == *needle) {
                 let start = i + pos + needle.len();
                 let end = ko[start..]
                     .iter()
@@ -214,7 +227,16 @@ pub fn mkimage(opts: MkimageOpts) -> Result<()> {
             out
         };
         for d in &deps {
-            load_module(d, module_paths, builtin, linux_pkg, staging, done, order, depth + 1)?;
+            load_module(
+                d,
+                module_paths,
+                builtin,
+                linux_pkg,
+                staging,
+                done,
+                order,
+                depth + 1,
+            )?;
         }
         let out_name = format!("/modules/{stem}.ko");
         std::fs::write(staging.join("modules").join(format!("{stem}.ko")), &ko)?;
@@ -353,10 +375,7 @@ pub fn mkimage(opts: MkimageOpts) -> Result<()> {
         let data = std::fs::read(f.path())?;
         entries.push(Entry {
             name: format!("/modules/{name}"),
-            kind: EntryKind::File {
-                data,
-                mode: 0o644,
-            },
+            kind: EntryKind::File { data, mode: 0o644 },
         });
     }
 
@@ -382,13 +401,14 @@ pub fn mkimage(opts: MkimageOpts) -> Result<()> {
     Ok(())
 }
 
-fn fetch_to_cache(
-    pkg: &crate::pkg::PackageInfo,
-    cache: &Path,
-    force: bool,
-) -> Result<PathBuf> {
+fn fetch_to_cache(pkg: &crate::pkg::PackageInfo, cache: &Path, force: bool) -> Result<PathBuf> {
     let local = cache.join(&pkg.filename);
-    if force || !local.exists() || std::fs::metadata(&local).map(|m| m.len() == 0).unwrap_or(true) {
+    if force
+        || !local.exists()
+        || std::fs::metadata(&local)
+            .map(|m| m.len() == 0)
+            .unwrap_or(true)
+    {
         let url = format!(
             "{MIRROR}/{}/os/x86_64/{}",
             pkg.repo,
