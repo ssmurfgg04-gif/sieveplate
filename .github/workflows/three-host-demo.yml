@@ -75,12 +75,20 @@ jobs:
 
       - name: Run node ${{ matrix.host }} (role ${{ matrix.role }})
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -o pipefail
+          # Every job of THIS run shares github.run_id — find the bus issue
+          # by title instead of relying on cross-job output plumbing.
+          # REST list (no search-index lag), filtered locally by run id
+          ISSUE=$(gh api "repos/${{ github.repository }}/issues?state=open&per_page=20" \
+            --jq '[.[] | select(.title | contains("SIEVE-BUS run ${{ github.run_id }}"))][0].number')
+          echo "bus issue: $ISSUE"
+          test -n "$ISSUE"
           ./target/release/sieve bus \
             --name ${{ matrix.host }} \
             --repo ${{ github.repository }} \
-            --issue ${{ needs.bus-setup.outputs.issue }} \
+            --issue "$ISSUE" \
             --peers alpha,beta,gamma \
             --links "${{ matrix.links }}" \
             --role ${{ matrix.role }} \
