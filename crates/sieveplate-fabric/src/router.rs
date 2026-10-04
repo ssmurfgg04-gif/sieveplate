@@ -69,6 +69,8 @@ struct Inner {
     peers: RwLock<HashMap<String, (PeerTx, u64)>>,
     /// Monotonic connection-id source.
     conn_seq: std::sync::atomic::AtomicU64,
+    /// Periodic-refresh loop started once, on first attach.
+    refresh_started: std::sync::atomic::AtomicBool,
     promises: Promises,
     /// Multi-hop routing table (ADR-0006): dest host → next hop + cost.
     mesh: RouteTable,
@@ -94,6 +96,7 @@ impl Fabric {
                 proxies: RwLock::new(HashMap::new()),
                 peers: RwLock::new(HashMap::new()),
                 conn_seq: std::sync::atomic::AtomicU64::new(1),
+                refresh_started: std::sync::atomic::AtomicBool::new(false),
                 promises,
                 mesh: RouteTable::new(host.clone()),
             }),
@@ -140,9 +143,16 @@ impl Fabric {
             .remove(&format!("{vat}/{cell}"));
     }
 
+    /// How often the full table is re-announced even with no topology
+    /// change (ADR-0006). Triggered updates converge in O(diameter); the
+    /// periodic refresh is the safety net that bounds recovery if ANY
+    /// triggered edge is ever missed (lost frame, unlucky crash timing).
+    pub const MESH_REFRESH_SECS: u64 = 2;
+
     /// Register (or replace) a remote peer's frame sender. The peer joins
     /// the mesh at cost 1 and the full table is re-announced so both sides
-    /// (and everyone else) converge.
+    /// (and everyone else) converge. The first attach also starts the
+    /// periodic refresh loop for this fabric.
     pub fn attach_peer(&self, host: &str, tx: PeerTx) -> u64 {
         let conn = self
             .inner
@@ -155,6 +165,26 @@ impl Fabric {
             .insert(host.to_string(), (tx, conn));
         self.inner.mesh.add_direct(host);
         self.spawn_announce(None);
+        if !self
+            .inner
+            .refresh_started
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            let this = self.clone();
+            tokio::spawn(async move {
+                let mut tick =
+                    tokio::time::interval(std::time::Duration::from_secs(Self::MESH_REFRESH_SECS));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    tick.tick().await;
+                    if this.peers().is_empty() {
+                        continue;
+                    }
+                    tracing::trace!("mesh periodic refresh");
+                    this.spawn_announce(None);
+                }
+            });
+        }
         conn
     }
 

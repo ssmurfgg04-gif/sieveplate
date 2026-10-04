@@ -66,6 +66,38 @@ async fn boot_host(tag: &str) -> (Host, sieveplate_fabric::Network) {
     (host, net)
 }
 
+/// A call that tolerates a lost frame (mesh delivery is at-most-once):
+/// idempotent verbs may be retried; every failure dumps the routing state
+/// so a CI-only deadlock is diagnosable from the log.
+async fn call_retry(
+    fabric: &sieveplate_fabric::Fabric,
+    port: Port,
+    kind: &str,
+    payload: Vec<u8>,
+    attempts: usize,
+) -> Result<Vec<u8>, String> {
+    let mut last = String::new();
+    for attempt in 1..=attempts {
+        match fabric
+            .call(port.clone(), kind, payload.clone(), Duration::from_secs(5))
+            .await
+        {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                last = format!("{e}");
+                eprintln!(
+                    "[mesh-diag] attempt {attempt} failed: {last}; host={} table={:?} peers={:?}",
+                    fabric.host(),
+                    fabric.mesh().snapshot(),
+                    fabric.peers()
+                );
+                tokio::time::sleep(Duration::from_millis(400)).await;
+            }
+        }
+    }
+    Err(last)
+}
+
 /// Wait until `from`'s table reports `dest` at the expected hop count.
 async fn await_route(from: &Host, dest: &str, hops: u32) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -264,16 +296,15 @@ async fn mesh_relay_crash_fails_fast_then_recovers() {
     await_route(&c, "mcrash-a", 2).await;
 
     // Traffic flows again — and c's counter kept its state (3 from before).
-    let n = a
-        .fabric
-        .call(
-            Port::new("mcrash-c", "core", "counter"),
-            "get",
-            vec![],
-            Duration::from_secs(10),
-        )
-        .await
-        .unwrap();
+    let n = call_retry(
+        &a.fabric,
+        Port::new("mcrash-c", "core", "counter"),
+        "get",
+        vec![],
+        5,
+    )
+    .await
+    .unwrap();
     assert_eq!(u64::from_le_bytes(n[..8].try_into().unwrap()), 3);
 
     for h in [&a, &b, &c] {
@@ -358,16 +389,15 @@ async fn mesh_ring_reroutes_around_dead_hub() {
     // Same rule as everywhere: wait for C's back-route before trusting
     // delivery in BOTH directions.
     await_route(&c, "ring-a", 2).await;
-    let n = a
-        .fabric
-        .call(
-            Port::new("ring-c", "core", "counter"),
-            "get",
-            vec![],
-            Duration::from_secs(10),
-        )
-        .await
-        .unwrap();
+    let n = call_retry(
+        &a.fabric,
+        Port::new("ring-c", "core", "counter"),
+        "get",
+        vec![],
+        5,
+    )
+    .await
+    .unwrap();
     assert_eq!(u64::from_le_bytes(n[..8].try_into().unwrap()), 1);
 
     for h in [&a, &b, &c, &d] {
