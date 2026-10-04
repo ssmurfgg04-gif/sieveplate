@@ -1,0 +1,31 @@
+[package]
+name = "sieveplate-os"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The sieveplate OS: PID-1 init, spore package manager (Arch .pkg.tar.zst), bootable-image builder"
+
+[[bin]]
+name = "sieve-os"
+path = "src/bin/sieve-os.rs"
+
+[dependencies]
+sieveplate-core.workspace = true
+sieveplate-store.workspace = true
+sieveplate-cells.workspace = true
+sieveplate-fabric.workspace = true
+sieveplate-engine.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+libc.workspace = true
+# HTTP (Arch mirrors) with rustls — static-musl friendly, no system certs needed
+ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+# package extraction
+tar = "0.4"
+zstd = "0.13"
+flate2 = "1"
+sha2.workspace = true
+hex.workspace = true
+tracing.workspace = true

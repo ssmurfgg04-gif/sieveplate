@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/sieveplate-store", "crates/sieveplate-core", "crates/sieveplate-cells", "crates/sieveplate-fabric", "crates/sieveplate-engine", "crates/sieveplate-senses", "crates/sieveplate-sysdef", "crates/sieveplate-hearth", "crates/sieveplate-jail", "crates/sieveplate-microvm", "crates/sieveplate-ctl"]
+members = ["crates/sieveplate-store", "crates/sieveplate-core", "crates/sieveplate-cells", "crates/sieveplate-fabric", "crates/sieveplate-engine", "crates/sieveplate-senses", "crates/sieveplate-sysdef", "crates/sieveplate-hearth", "crates/sieveplate-jail", "crates/sieveplate-microvm", "crates/sieveplate-os", "crates/sieveplate-ctl"]
 
 [workspace.package]
 version = "0.1.0"
@@ -23,6 +23,7 @@ sieveplate-sysdef  = { path = "crates/sieveplate-sysdef" }
 sieveplate-hearth  = { path = "crates/sieveplate-hearth" }
 sieveplate-jail    = { path = "crates/sieveplate-jail" }
 sieveplate-microvm = { path = "crates/sieveplate-microvm" }
+sieveplate-os      = { path = "crates/sieveplate-os" }
 
 # external
 serde              = { version = "1", features = ["derive"] }
@@ -32,6 +33,7 @@ tokio              = { version = "1", features = ["full"] }
 tokio-util         = "0.7"
 sha2               = "0.10"
 hex                = "0.4"
+base64             = "0.22"
 thiserror          = "2"
 anyhow             = "1"
 tracing            = "0.1"
@@ -40,6 +42,7 @@ async-trait        = "0.1"
 futures            = "0.3"
 toml               = "0.8"
 clap               = { version = "4", features = ["derive"] }
+os_pipe            = "1"
 inotify            = "0.11"
 
 # crypto — secure host-to-host links (ADR-0004: hybrid post-quantum)

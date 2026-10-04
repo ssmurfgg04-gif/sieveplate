@@ -9,11 +9,12 @@
 //!   automatically, so a caller can compose multi-hop chains without ever
 //!   blocking (the Pathways/Goblins pattern)
 
+pub mod bus;
 pub mod error;
 pub mod identity;
 pub mod mesh;
-mod net;
-mod router;
+pub mod net;
+pub mod router;
 pub mod secure;
 
 pub use error::FabricError;

@@ -1,0 +1,131 @@
+name: three-host-demo
+
+# Three REAL GitHub runners form one sieveplate cell grid without any
+# inbound networking:
+#
+#   alpha ── beta ── gamma      (alpha and gamma have NO link)
+#
+# Sealed SIEVE1 frames (hybrid post-quantum) travel as addressed comments
+# on a temporary GitHub issue ("the bus"). The demo proves, across three
+# separate machines:
+#   1. SIEVE1 handshake + peer pinning over a transport with no sockets
+#   2. mesh route convergence (alpha learns gamma via beta)
+#   3. multi-hop envelope routing with TTL (alpha → beta → gamma)
+#   4. signed receipts (Ed25519 + ML-DSA) verified against pinned keys
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "crates/sieveplate-fabric/**"
+      - "crates/sieveplate-ctl/**"
+      - ".github/workflows/three-host-demo.yml"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  bus-setup:
+    runs-on: ubuntu-latest
+    outputs:
+      issue: ${{ steps.mk.outputs.result }}
+    steps:
+      - id: mk
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const res = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `SIEVE-BUS run ${context.runId} (temporary, closed after the demo)`,
+              body: [
+                'Temporary message bus for the **three-host sieveplate demo**.',
+                '',
+                'Everything posted here by the nodes is a SIEVE-BUS batch of',
+                '**ciphertext frames** (ChaCha20-Poly1305 under a hybrid',
+                'Ed25519+ML-DSA-65 / X25519+ML-KEM-768 handshake). Repo admins',
+                'can read every comment and still learn nothing about the',
+                'traffic. This issue is closed automatically after the run.',
+              ].join('\n'),
+            });
+            core.setOutput('result', res.data.number);
+
+  hosts:
+    needs: bus-setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { host: alpha, links: "beta",        role: alpha }
+          - { host: beta,  links: "alpha,gamma", role: beta }
+          - { host: gamma, links: "beta",        role: gamma }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the CLI
+        run: cargo build --release -p sieveplate-ctl
+
+      - name: Run node ${{ matrix.host }} (role ${{ matrix.role }})
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ./target/release/sieve bus \
+            --name ${{ matrix.host }} \
+            --repo ${{ github.repository }} \
+            --issue ${{ needs.bus-setup.outputs.issue }} \
+            --peers alpha,beta,gamma \
+            --links "${{ matrix.links }}" \
+            --role ${{ matrix.role }} \
+            --root ./rt-${{ matrix.host }} \
+            --window 420 \
+            --poll-ms 3000 2>&1 | tee node-${{ matrix.host }}.log
+
+      - name: Upload node log
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: node-${{ matrix.host }}-log
+          path: node-${{ matrix.host }}.log
+
+  verify:
+    needs: [bus-setup, hosts]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+
+      - name: Assert every node hit its milestones
+        run: |
+          echo "--- alpha (multi-hop caller + receipt verifier) ---"
+          grep -q "LINK-UP"                                     node-alpha-log/node-alpha.log
+          grep -q "ROUTE-FOUND"                                 node-alpha-log/node-alpha.log
+          grep -q "BUS-DEMO PASS multi-hop alpha->gamma"        node-alpha-log/node-alpha.log
+          grep -q "BUS-DEMO RECEIPTS-VERIFIED"                  node-alpha-log/node-alpha.log
+          grep -q "BUS-DEMO ALL-GREEN"                          node-alpha-log/node-alpha.log
+          echo "--- beta (relay) ---"
+          grep -q "LINK-UP"                                     node-beta-log/node-beta.log
+          grep -q "BUS-DEMO BETA-RECEIPT-POSTED"                node-beta-log/node-beta.log
+          echo "--- gamma (receiver) ---"
+          grep -q "BUS-DEMO GAMMA-RECEIVED"                     node-gamma-log/node-gamma.log
+          grep -q "BUS-DEMO GAMMA-RECEIPT-POSTED"               node-gamma-log/node-gamma.log
+          echo
+          echo "THREE-HOST DEMO: PASS (3 runners, no inbound ports, PQ-secure multi-hop)"
+
+      - name: Close the bus issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ needs.bus-setup.outputs.issue }},
+              state: 'closed',
+            });

@@ -10,6 +10,7 @@
 //! - `sieve store ...`  : put/get/gc/Datalog-query the content store
 
 mod bench;
+mod bus_cmd;
 mod demo;
 mod hearth_cmd;
 mod run;
@@ -80,9 +81,12 @@ enum Cmd {
     },
     /// Benchmark the cell grid
     Bench {
-        /// Which suite: wake | turns | store | cells | all
+        /// Which suite: wake | turns | store | cells | jail | handshake | linux | all
         #[arg(long, default_value = "all")]
         suite: String,
+        /// Also write machine-readable results here (for CI summaries)
+        #[arg(long)]
+        json: Option<String>,
     },
     /// Content-addressed versioning: snapshots, branches, diff/ddiff
     Hearth {
@@ -114,6 +118,39 @@ enum Cmd {
     Identity {
         #[command(subcommand)]
         cmd: IdentityCmd,
+    },
+    /// Three-host demo over a GitHub issue-comment bus (no inbound ports)
+    Bus {
+        /// My fabric host name (alpha | beta | gamma ...)
+        #[arg(long)]
+        name: String,
+        /// GitHub repo as owner/name owning the bus issue
+        #[arg(long)]
+        repo: String,
+        /// The bus issue number (must be fresh per run)
+        #[arg(long)]
+        issue: u64,
+        /// All participants, comma-separated
+        #[arg(long)]
+        peers: String,
+        /// Who I dial, comma-separated (topology edges from my side)
+        #[arg(long)]
+        links: String,
+        /// Role script: alpha (multi-hop caller + verifier) | beta (relay) | gamma (receiver)
+        #[arg(long)]
+        role: String,
+        /// Runtime root (identity, store, ledgers live here)
+        #[arg(long, default_value = "./runtime")]
+        root: String,
+        /// Whole-demo window in seconds
+        #[arg(long, default_value = "300")]
+        window: u64,
+        /// Bus poll interval in ms
+        #[arg(long, default_value = "3000")]
+        poll_ms: u64,
+        /// GitHub token (falls back to $GITHUB_TOKEN)
+        #[arg(long, default_value = "")]
+        token: String,
     },
 }
 
@@ -297,9 +334,42 @@ async fn main() -> anyhow::Result<()> {
             init_logging(true);
             run::status(&root)
         }
-        Cmd::Bench { suite } => {
+        Cmd::Bench { suite, json } => {
             init_logging(true);
-            bench::run(&suite).await
+            bench::run(&suite, json.as_deref()).await
+        }
+        Cmd::Bus {
+            name,
+            repo,
+            issue,
+            peers,
+            links,
+            role,
+            root,
+            window,
+            poll_ms,
+            token,
+        } => {
+            init_logging(true);
+            let split = |s: &str| -> Vec<String> {
+                s.split(',')
+                    .map(|x| x.trim().to_string())
+                    .filter(|x| !x.is_empty())
+                    .collect()
+            };
+            bus_cmd::run(bus_cmd::BusArgs {
+                name,
+                repo,
+                issue,
+                peers: split(&peers),
+                links: split(&links),
+                role,
+                root,
+                window,
+                poll_ms,
+                token,
+            })
+            .await
         }
         Cmd::Hearth { cmd } => {
             init_logging(true);

@@ -26,3 +26,8 @@ hkdf.workspace = true
 zeroize.workspace = true
 getrandom.workspace = true
 hex.workspace = true
+# GitHub issue-comment bus: links between hosts with no inbound ports
+# (CI runners behind NAT). Blocking HTTP, driven from tokio via
+# spawn_blocking.
+ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+base64.workspace = true

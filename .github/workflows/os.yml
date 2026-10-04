@@ -1,0 +1,76 @@
+name: os
+
+# Boot the actual sieveplate OS in QEMU on a GitHub runner:
+# real Arch kernel → our static Rust PID 1 → cell grid → SIEVE1 secure
+# link on loopback → `spore` installs REAL Arch Linux packages (ripgrep)
+# from the official mirror → runs the installed binary → clean poweroff.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "crates/sieveplate-os/**"
+      - "Cargo.toml"
+      - ".github/workflows/os.yml"
+
+jobs:
+  boot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install musl toolchain + QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools qemu-system-x86
+
+      - name: Build static sieve-os (PID 1 + spore + mkimage)
+        run: |
+          cargo build --release -p sieveplate-os --target x86_64-unknown-linux-musl
+          strip target/x86_64-unknown-linux-musl/release/sieve-os
+
+      - name: Assemble the bootable image (kernel + modules from real Arch packages)
+        run: |
+          ./target/x86_64-unknown-linux-musl/release/sieve-os mkimage \
+            --out ./os-image \
+            --init ./target/x86_64-unknown-linux-musl/release/sieve-os
+
+      - name: Boot in QEMU, install ripgrep from the Arch repo, assert milestones
+        run: |
+          set -o pipefail
+          timeout 900 qemu-system-x86_64 \
+            -m 1024 -smp 2 -nographic -no-reboot \
+            -kernel ./os-image/vmlinuz \
+            -initrd ./os-image/initramfs.cpio \
+            -append "console=ttyS0 panic=-1 nokaslr sieve-pkg=ripgrep" \
+            -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+            2>&1 | tee boot.log
+
+          echo "--- milestone assertions ---"
+          grep -q "OS-UP"              boot.log || { echo "FAIL: OS-UP";              exit 1; }
+          grep -q "CELL-OK"            boot.log || { echo "FAIL: CELL-OK";            exit 1; }
+          grep -q "SIEVE1-LINK-OK"     boot.log || { echo "FAIL: SIEVE1-LINK-OK";     exit 1; }
+          grep -q "NET-UP"             boot.log || { echo "FAIL: NET-UP";             exit 1; }
+          grep -q "PKG-OK ripgrep"     boot.log || { echo "FAIL: PKG-OK ripgrep";     exit 1; }
+          grep -q "APP-RUN pkg=ripgrep" boot.log || { echo "FAIL: APP-RUN ripgrep";   exit 1; }
+          grep -q "MILESTONE-ALL-COMPLETE" boot.log || { echo "FAIL: milestones";     exit 1; }
+          grep -q "SHUTDOWN-CLEAN"     boot.log || { echo "FAIL: SHUTDOWN-CLEAN";     exit 1; }
+          echo "BOOT + PACKAGE INSTALL: ALL MILESTONES PASS"
+
+      - name: Upload image + boot log
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: os-image
+          path: |
+            os-image/vmlinuz
+            os-image/initramfs.cpio
+            boot.log

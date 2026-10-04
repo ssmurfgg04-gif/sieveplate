@@ -23,6 +23,39 @@ Reproduce: `cargo run -p sieveplate-ctl --release -- bench --suite all`.
 | **handshake: SIEVE1 full** | 50 | **3.6 ms** | 5.3 ms | complete secure-link handshake: X25519 DH + ML-KEM-768 encapsulation, Ed25519 + ML-DSA-65 dual signature generation AND verification, HKDF key schedule |
 | **wasm: turn (WASI cell)** | 2 ticks | **2.1 ms** | 2.1 ms | ONE message into a Wasmtime WASI cell: fresh instance per turn + state re-materialization + JSON stdin/stdout + CAS persist. Instance creation dominates; thread cells are the low-latency path (µs) |
 
+
+## sieveplate vs standard Linux — same machine, same run (`--suite linux`)
+
+The `linux` suite measures STANDARD Linux primitives in the same process
+as the sieveplate rows, on the same core, in the same run. Nothing is
+compared across machines, and no row claims to equal another row's cost
+category — the point is calibration, not victory:
+
+| benchmark | n | p50 | what it is |
+|---|---|---|---|
+| linux: UDS round-trip (64 B) | 2000 | ~22 µs | Unix domain socket, echo server task |
+| linux: TCP loopback round-trip (64 B) | 2000 | ~29 µs | loopback TCP, same payload |
+| linux: pipe round-trip (64 B, 2 pipes) | 2000 | ~13 µs | two OS pipes + a blocking thread — the cheapest kernel-mediated IPC |
+| linux: fork+exec /bin/true (wait) | 50 | ~275 µs | the floor for ANY process-based isolation |
+| linux: SIEVE1 sealed round-trip (64 B) | 2000 | ~277 µs | the SAME UDS path but each frame sealed: ChaCha20-Poly1305 seal + open, per-direction nonces, sequence replay check |
+
+Reading these honestly:
+
+- The in-proc cell turn (15 µs) is **not** OS-mediated; the pipe row is
+  shown only to calibrate what the kernel's cheapest IPC costs.
+- A process cell (`jail` rows, ~1.1 ms spawn / ~71 µs turn) sits close to
+  the fork+exec floor (~275 µs on the runner) plus seccomp/Landlock setup
+  and the mediated-pipe protocol — isolation is paid for where it is used.
+- The SIEVE1 sealed round-trip (~277 µs) vs raw UDS (~22 µs) is what
+  hybrid post-quantum confidentiality costs per message at 64 B — about
+  12× on this machine. When a link does not need it, that is a real
+  reason not to have it; sieveplate always has it (no plaintext mode).
+- CI re-measures all of this on `ubuntu-latest` on every run of
+  `bench-vs-linux.yml` — the numbers above are from a dev container, the
+  workflow's step summary is the runner's own fresh measurement.
+
+Reproduce locally: `cargo run -p sieveplate-ctl --release -- bench --suite linux --json out.json`.
+
 Mesh note (measured in tests, not a benchmark suite): a 3-host line
 converges in triggered announcements (link-up/down events only — no
 periodic timer) and reroutes around a dead relay within a few

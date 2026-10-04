@@ -17,8 +17,8 @@
 
 use std::sync::Arc;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{tcp::OwnedWriteHalf, TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 use crate::error::FabricError;
@@ -151,13 +151,15 @@ impl Network {
 /// identity name / caller alias); when hello names a different fabric
 /// host the entry is moved. On ANY teardown the final name is used for
 /// crash detection, so route withdrawal hits the right entry.
-async fn pump(
+pub(crate) async fn pump<R>(
     fabric: Fabric,
-    mut rd: tokio::net::tcp::OwnedReadHalf,
+    mut rd: R,
     mut sec_rx: secure::SecureRx,
     tx: PeerTx,
     attach_now: String,
-) {
+) where
+    R: AsyncRead + Unpin,
+{
     let mut my_conn = fabric.attach_peer(&attach_now, tx.clone());
     let mut peer_name = attach_now;
     let mut raw = [0u8; 4];
@@ -233,7 +235,25 @@ async fn inbound(
     link: LinkConfig,
     peer_addr: String,
 ) -> Result<(), FabricError> {
-    let (mut rd, mut wr) = stream.into_split();
+    let (rd, wr) = stream.into_split();
+    establish_inbound(fabric, rd, wr, link, peer_addr).await
+}
+
+/// Transport-agnostic inbound link: SIEVE1 responder over ANY duplex byte
+/// stream (TCP today, the GitHub-issue bus and stdio in tests). Runs the
+/// handshake, announces our fabric name inside the sealed channel, then
+/// pumps envelopes until the stream closes.
+pub(crate) async fn establish_inbound<R, W>(
+    fabric: Fabric,
+    mut rd: R,
+    mut wr: W,
+    link: LinkConfig,
+    peer_label: String,
+) -> Result<(), FabricError>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     let channel = secure::responder(
         &mut rd,
         &mut wr,
@@ -246,7 +266,7 @@ async fn inbound(
     let (tx, rx) = mpsc::channel::<Vec<u8>>(1024);
     let writer_task = spawn_writer(wr, rx, channel.tx);
     fabric.track_link(writer_task);
-    tracing::info!(peer = %id_host, addr = %peer_addr, "secure link established (inbound)");
+    tracing::info!(peer = %id_host, addr = %peer_label, "secure link established (inbound)");
 
     // Announce ourselves INSIDE the encrypted channel (fabric name).
     let hello = Envelope::new(
@@ -269,7 +289,25 @@ pub async fn connect_peer(
 ) -> Result<(), FabricError> {
     let alias = alias.to_string(); // owned: the reader task outlives this call
     let stream = TcpStream::connect(addr).await?;
-    let (mut rd, mut wr) = stream.into_split();
+    let (rd, wr) = stream.into_split();
+    establish_outbound(fabric, rd, wr, &alias, link).await
+}
+
+/// Transport-agnostic outbound link: SIEVE1 initiator over ANY duplex byte
+/// stream. Attach synchronously (alias) so callers can send immediately;
+/// the pump re-keys the entry to the remote's announced fabric name.
+pub(crate) async fn establish_outbound<R, W>(
+    fabric: &Fabric,
+    mut rd: R,
+    mut wr: W,
+    alias: &str,
+    link: &LinkConfig,
+) -> Result<(), FabricError>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let alias = alias.to_string(); // owned: the reader task outlives this call
     let channel = secure::initiator(
         &mut rd,
         &mut wr,
@@ -293,8 +331,6 @@ pub async fn connect_peer(
     );
     let _ = tx.send(frame(&hello)?).await;
 
-    // Attach synchronously (alias) so callers can send immediately; the
-    // pump re-keys the entry to the remote's announced fabric name.
     fabric.attach_peer(&alias, tx.clone());
     let reader = tokio::spawn(pump(fabric.clone(), rd, channel.rx, tx, alias));
     fabric.track_link(reader);
@@ -305,11 +341,14 @@ pub async fn connect_peer(
 /// Returns the task handle (tracked by the fabric so crash teardown can
 /// close the write half — otherwise an aborted reader leaves the socket
 /// half-open and the far end never sees EOF).
-fn spawn_writer(
-    mut wr: OwnedWriteHalf,
+fn spawn_writer<W>(
+    mut wr: W,
     mut rx: mpsc::Receiver<Vec<u8>>,
     mut sec: secure::SecureTx,
-) -> tokio::task::JoinHandle<()> {
+) -> tokio::task::JoinHandle<()>
+where
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     tokio::spawn(async move {
         while let Some(plain) = rx.recv().await {
             let sealed = match sec.seal(&plain) {

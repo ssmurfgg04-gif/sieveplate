@@ -59,8 +59,27 @@ cargo run -p sieveplate-ctl --release -- demo
 # declarative system: validate → closure hash → run until Ctrl-C
 cargo run -p sieveplate-ctl -- run -f examples/system.toml --root ./runtime
 
-# benchmarks — each row states what it measures and what it does not
+# benchmarks — each row states what it measures and what it does not;
+# `--suite linux` re-measures STANDARD Linux primitives in the same run
 cargo run -p sieveplate-ctl --release -- bench --suite all
+
+# boot the REAL OS in QEMU: Arch kernel, Rust PID 1, cell grid, SIEVE1 link,
+# install ripgrep from the official Arch repo, run it, clean poweroff
+# (what CI does: .github/workflows/os.yml)
+cargo build -p sieveplate-os --target x86_64-unknown-linux-musl --release
+target/x86_64-unknown-linux-musl/release/sieve-os mkimage --out ./os-image \
+  --init target/x86_64-unknown-linux-musl/release/sieve-os
+qemu-system-x86_64 -m 1024 -nographic -no-reboot \
+  -kernel ./os-image/vmlinuz -initrd ./os-image/initramfs.cpio \
+  -append "console=ttyS0 sieve-pkg=ripgrep" \
+  -netdev user,id=n0 -device virtio-net-pci,netdev=n0
+
+# three hosts, three machines, no inbound ports: the GitHub-issue bus
+# (.github/workflows/three-host-demo.yml runs alpha→beta→gamma multi-hop
+# with SIEVE1 sealed frames and signed receipts on real runners)
+cargo run -p sieveplate-ctl --release -- bus --name alpha \
+  --repo OWNER/REPO --issue <fresh-issue> \
+  --peers alpha,beta,gamma --links beta --role alpha
 ```
 
 ### A declarative system
@@ -118,6 +137,9 @@ CAS, so `sieve rollback` is applying the previous plan.
 | WASM cells | Any `wasm32-wasip1` program as a cell: Wasmtime + WASI p1, one turn per instance, state in one preopened dir, outgoing messages capability-rechecked; scale-to-zero is structural (ADR-0008) | `crates/sieveplate-ctl/tests/wasm.rs` |
 | Identity rotation | Key format frozen at v1; rotation = statement signed by Ed25519+ML-DSA-65 under old AND new keys; peers re-pin on the next handshake; replays/downgrades rejected | `crates/sieveplate-ctl/tests/identity_rotation.rs` |
 | Searchable by meaning | Embedded Datalog over the event log | local log |
+| Bootable OS | Real Arch kernel + our static Rust **PID 1**; mounts, DHCP, cell grid, SIEVE1 loopback link, clean poweroff — all milestone-asserted in CI | `crates/sieveplate-os`, `os.yml` |
+| Arch package installs | **`spore`**: fetches real `.pkg.tar.zst` from the official mirrors, resolves deps/provides/constraints, extracts with tar metadata, records a local db. Installs and RUNS `ripgrep` inside the QEMU boot demo | `crates/sieveplate-os`, `os.yml` |
+| Links with no inbound ports | **Issue-comment bus**: the full SIEVE1 + mesh stack runs over a temporary GitHub issue (sealed frames as addressed comments); 3-runner demo with multi-hop routing and signed receipts | `sieve bus`, `three-host-demo.yml` |
 | Reproducible systems | Closure hash = f(spec, template descriptors); content-addressed plans; rollback | declarative layer |
 
 Not guaranteed (yet): formal verification of anything beyond what seL4
@@ -139,7 +161,8 @@ hybrid-PQ, storage is not).
 | [`sieveplate-engine`](crates/sieveplate-engine) | L4 | host, cell lifecycle (create/snapshot/restore/scale-to-zero) |
 | [`sieveplate-senses`](crates/sieveplate-senses) | L1 | timer/TCP/inotify sources, real eBPF socket-filter loader |
 | [`sieveplate-sysdef`](crates/sieveplate-sysdef) | L7 | TOML spec, closure hash, plan diff, content-addressed rollback |
-| [`sieveplate-ctl`](crates/sieveplate-ctl) | — | `sieve` CLI: demo / run / top (Catppuccin Mocha live dashboard) / apply / plan / rollback / bench / store / hearth / identity (show · rotate) |
+| [`sieveplate-os`](crates/sieveplate-os) | L0-ish | bootable OS: static Rust PID 1, `spore` package manager (real Arch `.pkg.tar.zst`), initramfs builder, QEMU-asserted boot |
+| [`sieveplate-ctl`](crates/sieveplate-ctl) | — | `sieve` CLI: demo / run / top (Catppuccin Mocha live dashboard) / apply / plan / rollback / bench / store / hearth / identity (show · rotate) / **bus** (3-host demo) |
 
 Documentation: [ARCHITECTURE.md](ARCHITECTURE.md) ·
 [PHASES.md](PHASES.md) · [BENCHMARKS.md](BENCHMARKS.md) ·

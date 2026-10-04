@@ -1,0 +1,66 @@
+name: bench-vs-linux
+
+# Honest same-runner benchmarking: every sieveplate number is measured
+# next to the equivalent STANDARD Linux primitive on the SAME machine in
+# the SAME run — UDS, TCP loopback, pipes, fork+exec — plus the same
+# payload through a SIEVE1 sealed channel to isolate what the
+# post-quantum crypto adds over raw sockets.
+#
+# Runs on ubuntu-latest (the GitHub runner image) so the numbers are
+# reproducible and comparable over time. Results go to the job summary
+# and a JSON artifact.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1" # Mondays 03:00 UTC
+  push:
+    branches: [main]
+    paths:
+      - "crates/sieveplate-ctl/**"
+      - "crates/sieveplate-engine/**"
+      - "crates/sieveplate-fabric/**"
+      - "crates/sieveplate-jail/**"
+      - ".github/workflows/bench-vs-linux.yml"
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the CLI (release)
+        run: cargo build --release -p sieveplate-ctl
+
+      - name: Run sieveplate + standard-Linux benchmarks (same machine, same run)
+        run: |
+          ./target/release/sieve bench --suite all --json bench.json | tee bench.log
+
+      - name: Render the comparison into the job summary
+        env:
+          RUNNER_CPUINFO: ${{ runner.name }}
+        run: |
+          {
+            echo "## Benchmarks — sieveplate vs standard Linux"
+            echo
+            echo "Runner: \`$RUNNER_CPUINFO\`, $(nproc) vCPU, ubuntu-latest, measured $(date -u '+%Y-%m-%d %H:%M UTC')."
+            echo
+            echo '```'
+            sed -n '/Sieveplate benchmarks/,$p' bench.log
+            echo '```'
+            echo
+            echo "Every number was measured **in this run, on this runner** —"
+            echo "no cross-machine comparisons, no spec-sheet numbers."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: |
+            bench.log
+            bench.json
