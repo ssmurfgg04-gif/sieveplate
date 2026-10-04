@@ -194,31 +194,72 @@ fn bring_up_network() {
         .status();
     let _ = std::fs::create_dir_all("/etc");
     let _ = std::fs::write("/etc/resolv.conf", "nameserver 10.0.2.3\n");
-    let out = std::process::Command::new("/bin/busybox")
-        .args([
-            "udhcpc",
-            "-i",
-            &iface,
-            "-s",
-            "/usr/share/udhcpc/default.script",
-            "-n",
-            "-q",
-            "-t",
-            "6",
-            "-T",
-            "2",
-        ])
-        .output();
-    let got_ip = out
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("lease"));
-    match got_ip {
-        Some(true) => println!("NET-UP iface={iface} dhcp=lease"),
-        _ => {
-            // still fine for the non-network milestones; report honestly
-            println!("NET-UP iface={iface} dhcp=no-lease");
+    // udhcpc announces the lease on STDERR. Retry DHCP, then fall back to
+    // QEMU-slirp's fixed addressing (10.0.2.15/24 via 10.0.2.2) so one
+    // flaky DHCP exchange cannot sink the whole demo. Mode reported honestly.
+    let mut mode: Option<String> = None;
+    for _ in 0..3 {
+        let out = std::process::Command::new("/bin/busybox")
+            .args([
+                "udhcpc",
+                "-i",
+                &iface,
+                "-s",
+                "/usr/share/udhcpc/default.script",
+                "-n",
+                "-q",
+                "-t",
+                "4",
+                "-T",
+                "2",
+            ])
+            .output();
+        let Ok(o) = out else { continue };
+        let so = String::from_utf8_lossy(&o.stdout);
+        let se = String::from_utf8_lossy(&o.stderr);
+        if so.contains("lease obtained") || se.contains("lease obtained") {
+            mode = Some("dhcp".into());
+            break;
         }
+        let ifout = std::process::Command::new("/bin/busybox")
+            .args(["ifconfig", &iface])
+            .output();
+        if let Ok(io) = ifout {
+            if String::from_utf8_lossy(&io.stdout).contains("inet addr:") {
+                mode = Some("dhcp".into());
+                break;
+            }
+        }
+        println!(
+            "dhcp-retry detail: {}",
+            se.lines().take(2).collect::<Vec<_>>().join(" | ")
+        );
+    }
+    if mode.is_none() {
+        let ip = std::process::Command::new("/bin/busybox")
+            .args([
+                "ifconfig",
+                &iface,
+                "10.0.2.15",
+                "netmask",
+                "255.255.255.0",
+                "up",
+            ])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        let gw = std::process::Command::new("/bin/busybox")
+            .args(["route", "add", "default", "gw", "10.0.2.2", "dev", &iface])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ip && gw {
+            mode = Some("static-slirp-fallback".into());
+        }
+    }
+    match mode {
+        Some(m) => println!("NET-UP iface={iface} mode={m}"),
+        None => println!("NET-UP iface={iface} mode=none (no lease, no fallback)"),
     }
 }
 

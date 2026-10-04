@@ -505,6 +505,14 @@ pub fn extract_package(pkg_path: &Path, root: &Path) -> Result<Vec<String>> {
                 files.push(name);
             }
             tar::EntryType::Regular => {
+                // Runtime-owned state: a package shipping an empty
+                // /etc/resolv.conf would cut the resolver off MID-INSTALL
+                // (observed with Arch's `filesystem` package — DNS worked
+                // for the first packages, then EAI_AGAIN). Keep ours.
+                if name == "etc/resolv.conf" && dest.exists() {
+                    println!("spore: keeping runtime /etc/resolv.conf (package ships its own)");
+                    continue;
+                }
                 if let Some(parent) = dest.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
