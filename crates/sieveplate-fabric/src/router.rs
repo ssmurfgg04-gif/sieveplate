@@ -6,6 +6,7 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
+use crate::mesh::{RouteAnnounce, RouteAnnounceEntry, RouteTable, POISON};
 use sieveplate_core::{
     CellError, Continuation, Envelope, Port, PromiseId, Promises, Route, VatInput,
 };
@@ -13,11 +14,43 @@ use sieveplate_core::{
 /// Raw frame sender to a remote peer (net.rs fills this).
 pub type PeerTx = mpsc::Sender<Vec<u8>>;
 
+/// Routing-table announcement control kind (sealed channel, ADR-0006).
+pub const KIND_ROUTES: &str = "__routes";
+
+/// Routing facts for one in-flight remote call.
+struct InflightCall {
+    /// The peer key whose link carries this call (final dest when direct,
+    /// the mesh next hop when forwarded). Link death = this call fails.
+    next_hop: String,
+    /// Original caller port (None-safe). `originator()` compares its host
+    /// against ours.
+    from: Option<Port>,
+}
+
+impl InflightCall {
+    fn clone_for_fault(&self) -> InflightCall {
+        InflightCall {
+            next_hop: self.next_hop.clone(),
+            from: self.from.clone(),
+        }
+    }
+
+    fn is_originator(&self, self_host: &str) -> bool {
+        match &self.from {
+            Some(p) => p.host == self_host,
+            None => true, // cannot route a fault back — resolve locally
+        }
+    }
+}
+
 struct Inner {
     host: String,
-    /// Promises awaiting a REMOTE reply: pid → peer host. On peer
-    /// disconnect every entry for that peer fails fast (crash detection).
-    inflight: RwLock<HashMap<PromiseId, String>>,
+    /// In-flight REMOTE calls: pid → routing info. On a link death every
+    /// call whose NEXT HOP was that link fails fast — locally when we
+    /// originated the call, or via a `__fault` envelope routed back to the
+    /// original caller when we only forwarded it (multi-hop crash
+    /// detection, ADR-0006).
+    inflight: RwLock<HashMap<PromiseId, InflightCall>>,
     /// Live link tasks (accept loops + connection pumps). `crash_links`
     /// aborts them all, closing every socket — a host-level crash.
     links: RwLock<Vec<tokio::task::JoinHandle<()>>>,
@@ -29,6 +62,8 @@ struct Inner {
     proxies: RwLock<HashMap<String, mpsc::Sender<Envelope>>>,
     peers: RwLock<HashMap<String, PeerTx>>,
     promises: Promises,
+    /// Multi-hop routing table (ADR-0006): dest host → next hop + cost.
+    mesh: RouteTable,
 }
 
 /// The fabric: one instance per host. Clone freely.
@@ -40,9 +75,10 @@ pub struct Fabric {
 impl Fabric {
     /// A fabric for `host`. Promise registry is shared with all clones.
     pub fn new(host: impl Into<String>, promises: Promises) -> Self {
+        let host = host.into();
         Fabric {
             inner: Arc::new(Inner {
-                host: host.into(),
+                host: host.clone(),
                 inflight: RwLock::new(HashMap::new()),
                 links: RwLock::new(Vec::new()),
                 listener: RwLock::new(None),
@@ -50,8 +86,14 @@ impl Fabric {
                 proxies: RwLock::new(HashMap::new()),
                 peers: RwLock::new(HashMap::new()),
                 promises,
+                mesh: RouteTable::new(host.clone()),
             }),
         }
+    }
+
+    /// The multi-hop routing table (mesh, ADR-0006).
+    pub fn mesh(&self) -> &RouteTable {
+        &self.inner.mesh
     }
 
     pub fn host(&self) -> &str {
@@ -89,13 +131,71 @@ impl Fabric {
             .remove(&format!("{vat}/{cell}"));
     }
 
-    /// Register (or replace) a remote peer's frame sender.
+    /// Register (or replace) a remote peer's frame sender. The peer joins
+    /// the mesh at cost 1 and the full table is re-announced so both sides
+    /// (and everyone else) converge.
     pub fn attach_peer(&self, host: &str, tx: PeerTx) {
         self.inner
             .peers
             .write()
             .unwrap_or_else(|p| p.into_inner())
             .insert(host.to_string(), tx);
+        self.inner.mesh.add_direct(host);
+        self.spawn_announce(None);
+    }
+
+    /// Send a control frame DIRECTLY to a peer (bypasses the route table —
+    /// announcements must not be routed or they could not bootstrap).
+    fn send_control(&self, peer: &str, kind: &str, payload: Vec<u8>) {
+        let env = Envelope::new(Port::new("", "", ""), kind, payload);
+        let bytes = match crate::net::frame(&env) {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+        let tx = self
+            .inner
+            .peers
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(peer)
+            .cloned();
+        if let Some(tx) = tx {
+            tokio::spawn(async move {
+                let _ = tx.send(bytes).await;
+            });
+        }
+    }
+
+    /// Broadcast the full routing table to every direct peer. `poison`
+    /// entries (destination, POISON) are appended as withdrawals — peers
+    /// forget routes to them if they learned those routes from us.
+    pub fn spawn_announce(&self, poison: Option<Vec<String>>) {
+        let this = self.clone();
+        tokio::spawn(async move {
+            let ann = this.inner.mesh.announce();
+            let mut ann = ann;
+            if let Some(withdrawn) = poison {
+                for host in withdrawn {
+                    ann.entries.push(RouteAnnounceEntry { host, hops: POISON });
+                }
+            }
+            let payload = serde_json::to_vec(&ann).unwrap_or_default();
+            for peer in this.peers() {
+                this.send_control(&peer, KIND_ROUTES, payload.clone());
+            }
+        });
+    }
+
+    /// A `__routes` announcement arrived on a sealed link. Learn from it;
+    /// when our table changed, re-announce to everyone (triggered DV
+    /// update). This is the mesh convergence step.
+    pub fn mesh_receive(&self, ann: &RouteAnnounce) {
+        if ann.from == self.inner.host {
+            return; // our own table echoed back — nothing to learn
+        }
+        if self.inner.mesh.learn(ann) {
+            self.spawn_announce(None);
+        }
     }
 
     pub fn drop_peer(&self, host: &str) {
@@ -106,26 +206,53 @@ impl Fabric {
             .remove(host);
     }
 
-    /// Crash detection: the link to `host` broke. Every in-flight call to
-    /// that peer fails immediately — a caller waits for an ANSWER or a
-    /// FAILURE, never for a timeout that hides the difference.
+    /// Crash detection: the link to `host` broke. Every in-flight call
+    /// routed over that link fails immediately — a caller waits for an
+    /// ANSWER or a FAILURE, never for a timeout that hides the difference.
+    /// Calls we merely FORWARDED get a `__fault` envelope routed back to
+    /// the original caller (multi-hop failure propagation, ADR-0006).
+    /// Every mesh route that used this peer is withdrawn and poisoned
+    /// outward so the rest of the grid stops forwarding through the dead
+    /// link.
     pub fn peer_disconnected(&self, host: &str) {
         self.drop_peer(host);
+        let self_host = self.inner.host.clone();
         let mut inflight = self
             .inner
             .inflight
             .write()
             .unwrap_or_else(|p| p.into_inner());
-        let dead: Vec<PromiseId> = inflight
+        let dead: Vec<(PromiseId, InflightCall)> = inflight
             .iter()
-            .filter(|(_, peer)| peer.as_str() == host)
-            .map(|(pid, _)| *pid)
+            .filter(|(_, c)| c.next_hop == host)
+            .map(|(pid, c)| (*pid, c.clone_for_fault()))
             .collect();
-        for pid in dead {
+        for (pid, call) in dead {
             inflight.remove(&pid);
-            self.inner
-                .promises
-                .resolve_fail(pid, format!("peer '{host}' disconnected"));
+            if call.is_originator(&self_host) {
+                self.inner
+                    .promises
+                    .resolve_fail(pid, format!("peer '{host}' disconnected"));
+            } else if let Some(from) = call.from {
+                // Propagate: the caller may be one or more hops away.
+                let mut fault = Envelope::new(
+                    from,
+                    Envelope::KIND_FAULT,
+                    format!("peer '{host}' disconnected in transit").into_bytes(),
+                );
+                fault.id = pid;
+                let this = self.clone();
+                tokio::spawn(async move {
+                    let _ = this.deliver(fault).await;
+                });
+            }
+        }
+        drop(inflight);
+        // Mesh withdrawal: forget everything that routed via `host`, then
+        // poison those destinations to the surviving peers.
+        let withdrawn = self.inner.mesh.remove_peer(host);
+        if !withdrawn.is_empty() {
+            self.spawn_announce(Some(withdrawn));
         }
     }
 
@@ -276,31 +403,65 @@ impl Fabric {
 
     async fn deliver_remote(&self, env: Envelope) -> Result<(), CellError> {
         let host_name = env.to.host.clone();
-        // Track the call so a peer crash can fail it fast.
+        // Mesh loop guard: every forwarding host consumes one unit of TTL
+        // (ADR-0006). An envelope that cycles dies here instead of forever.
+        let env = {
+            let mut e = env;
+            if e.ttl == 0 {
+                return Err(CellError::Other(format!(
+                    "envelope to '{host_name}' exhausted its mesh TTL"
+                )));
+            }
+            e.ttl -= 1;
+            e
+        };
+        let bytes = crate::net::frame(&env)?;
+        // Direct socket first; otherwise forward via the mesh next hop
+        // (ADR-0006). A forwarder is any host on the path — including us.
+        let direct = self
+            .inner
+            .peers
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&host_name)
+            .cloned();
+        let (tx, used_hop) = match direct {
+            Some(tx) => (Some(tx), host_name.clone()),
+            None => match self.inner.mesh.next_hop(&host_name) {
+                Some(hop) => {
+                    let tx = self
+                        .inner
+                        .peers
+                        .read()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .get(&hop)
+                        .cloned();
+                    (tx, hop)
+                }
+                None => (None, host_name.clone()),
+            },
+        };
+        // Track the call against the LINK it actually uses, so a link
+        // death fails exactly the calls that depended on it.
         if let Some(pid) = env.reply_to {
             self.inner
                 .inflight
                 .write()
                 .unwrap_or_else(|p| p.into_inner())
-                .insert(pid, host_name.clone());
+                .insert(
+                    pid,
+                    InflightCall {
+                        next_hop: used_hop,
+                        from: env.from.clone(),
+                    },
+                );
         }
-        let bytes = crate::net::frame(&env)?;
-        let tx = self
-            .inner
-            .peers
-            .read()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(&env.to.host)
-            .cloned();
         match tx {
             Some(tx) => tx
                 .send(bytes)
                 .await
-                .map_err(|_| CellError::Other(format!("peer '{}' closed", host_name))),
-            None => Err(CellError::Other(format!(
-                "peer '{}' not connected",
-                host_name
-            ))),
+                .map_err(|_| CellError::Other(format!("peer toward '{host_name}' closed"))),
+            None => Err(CellError::Other(format!("no route to host '{host_name}'"))),
         }
     }
 
@@ -320,6 +481,22 @@ impl Fabric {
 #[async_trait]
 impl Route for Fabric {
     async fn deliver(&self, env: Envelope) -> Result<(), CellError> {
+        // Faults from the mesh resolve their promise as a FAILURE (the
+        // caller gets an error, never a fabricated value) and keep
+        // routing home when this host is only a transit stop.
+        if env.kind == Envelope::KIND_FAULT {
+            self.inner
+                .inflight
+                .write()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&env.id);
+            let reason =
+                String::from_utf8(env.payload.clone()).unwrap_or_else(|_| "mesh fault".to_string());
+            self.inner.promises.resolve_fail(env.id, reason);
+            if env.to.host == self.inner.host {
+                return Ok(());
+            }
+        }
         // Replies resolve their promise here (whoever receives them) and
         // fire any piped continuations chained onto it.
         if env.kind == Envelope::KIND_REPLY {

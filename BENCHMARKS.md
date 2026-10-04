@@ -21,6 +21,13 @@ Reproduce: `cargo run -p sieveplate-ctl --release -- bench --suite all`.
 | **jail: process cell spawn** | 20 | **1.14 ms** | 1.36 ms | REAL `fork+exec`, environment wiped, seccomp filter applied, Landlock attempted, worker init handshake |
 | **jail: first turn round-trip** | 20 | **71 µs** | 84 µs | envelope through length-prefixed pipe, handled in the jailed process, capability re-check at the parent, reply back |
 | **handshake: SIEVE1 full** | 50 | **3.6 ms** | 5.3 ms | complete secure-link handshake: X25519 DH + ML-KEM-768 encapsulation, Ed25519 + ML-DSA-65 dual signature generation AND verification, HKDF key schedule |
+| **wasm: turn (WASI cell)** | 2 ticks | **2.1 ms** | 2.1 ms | ONE message into a Wasmtime WASI cell: fresh instance per turn + state re-materialization + JSON stdin/stdout + CAS persist. Instance creation dominates; thread cells are the low-latency path (µs) |
+
+Mesh note (measured in tests, not a benchmark suite): a 3-host line
+converges in triggered announcements (link-up/down events only — no
+periodic timer) and reroutes around a dead relay within a few
+announcement rounds; delivery across 2 hops costs two additional
+loopback forwards per direction. See `crates/sieveplate-ctl/tests/mesh.rs`.
 
 The `jail` and `handshake` rows exist because the in-process rows say
 nothing about them. A process spawn costs ~55× a cell create; a

@@ -14,6 +14,7 @@ mod demo;
 mod hearth_cmd;
 mod run;
 mod store_cmd;
+mod top;
 
 use clap::{Parser, Subcommand};
 
@@ -92,6 +93,50 @@ enum Cmd {
     Store {
         #[command(subcommand)]
         cmd: StoreCmd,
+    },
+    /// Live dashboard over a running/declared system (Catppuccin Mocha TUI)
+    Top {
+        #[arg(short, long)]
+        file: String,
+        #[arg(long, default_value = "./runtime")]
+        root: String,
+        /// Headless: render one frame to this JSON file and exit
+        #[arg(long)]
+        screenshot: Option<String>,
+        /// Screenshot geometry (WxH)
+        #[arg(long, default_value = "100x31")]
+        size: String,
+        /// Screenshot: seed hearth demo branches when empty
+        #[arg(long)]
+        seed_hearth: bool,
+    },
+    /// Host identity operations (key format v1, ADR-0007)
+    Identity {
+        #[command(subcommand)]
+        cmd: IdentityCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum IdentityCmd {
+    /// Show the host identity: fingerprint, key generation, pinned peers
+    Show {
+        /// Host alias (defaults to the system name in the spec)
+        #[arg(long, default_value = "host")]
+        host: String,
+        #[arg(long, default_value = "./runtime")]
+        root: String,
+    },
+    /// Rotate to a fresh key pair (generation + 1). Produces a
+    /// RotationStatement signed by both generations with both algorithms;
+    /// peers still pinning old keys re-pin automatically on the next
+    /// handshake.
+    Rotate {
+        /// Host alias to rotate
+        #[arg(long, default_value = "host")]
+        host: String,
+        #[arg(long, default_value = "./runtime")]
+        root: String,
     },
 }
 
@@ -302,6 +347,71 @@ async fn main() -> anyhow::Result<()> {
                 StoreCmd::Gc { root } => store_cmd::gc(&root),
                 StoreCmd::Verify { root } => store_cmd::verify(&root),
                 StoreCmd::Query { goal, rules, root } => store_cmd::query(&goal, &rules, &root),
+            }
+        }
+        Cmd::Top {
+            file,
+            root,
+            screenshot,
+            size,
+            seed_hearth,
+        } => {
+            init_logging(true);
+            match screenshot {
+                Some(out) => top::screenshot(&file, &root, &out, &size, seed_hearth).await,
+                None => top::interactive(&file, &root).await,
+            }
+        }
+        Cmd::Identity { cmd } => {
+            init_logging(true);
+            match cmd {
+                IdentityCmd::Show { host, root } => {
+                    let dir = std::path::Path::new(&root).join("fabric");
+                    if !dir.join("identity.json").exists() {
+                        eprintln!("no identity at {}/fabric yet — run a system first", root);
+                        std::process::exit(1);
+                    }
+                    let id = sieveplate_fabric::HostIdentity::load_or_create(&dir, &host)?;
+                    let pubk = id.public();
+                    let peers = sieveplate_fabric::KnownPeers::open(dir.join("known_peers.json"))?;
+                    println!("host\t{}", id.host);
+                    println!("format\t{} v{}", id.format, id.version);
+                    println!("generation\t{}", id.generation);
+                    println!("fingerprint\t{}", sieveplate_fabric::fingerprint(&pubk));
+                    println!("algorithms\tEd25519 + ML-DSA-65 (hybrid, no downgrade)");
+                    println!("pinned_peers\t{}", peers.list().len());
+                    for (name, rec) in peers.list() {
+                        println!(
+                            "peer\t{}\t{}\tgen {}",
+                            name, rec.fingerprint, rec.generation
+                        );
+                    }
+                    Ok(())
+                }
+                IdentityCmd::Rotate { host, root } => {
+                    let dir = std::path::Path::new(&root).join("fabric");
+                    let id = sieveplate_fabric::HostIdentity::load_or_create(&dir, &host)?;
+                    let old_fp = sieveplate_fabric::fingerprint(&id.public());
+                    let (next, stmt) = id.rotate(&dir)?;
+                    stmt.verify()?;
+                    println!(
+                        "rotated\t{}\tgen {} -> gen {}",
+                        host, stmt.core.old_generation, stmt.core.new_generation
+                    );
+                    println!("old_fingerprint\t{}", old_fp);
+                    println!(
+                        "new_fingerprint\t{}",
+                        sieveplate_fabric::fingerprint(&next.public())
+                    );
+                    println!(
+                        "statement\tfabric/rotation-{}.json (4 signatures: Ed25519+ML-DSA-65 x old+new)",
+                        stmt.core.new_generation
+                    );
+                    println!(
+                        "next_handshake\tpeers still pinning the old keys re-pin automatically"
+                    );
+                    Ok(())
+                }
             }
         }
     }

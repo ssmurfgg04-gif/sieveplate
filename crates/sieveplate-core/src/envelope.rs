@@ -26,7 +26,18 @@ pub struct Envelope {
     pub depends_on: Option<PromiseId>,
     pub kind: String,
     pub payload: Vec<u8>,
+    /// Mesh forwarding budget (ADR-0006): decremented at every host that
+    /// forwards this envelope toward its destination. Zero means the
+    /// envelope was originated on THIS host and may be forwarded freely up
+    /// to [`MAX_HOPS`] more times; a forwarded envelope that arrives with
+    /// `ttl == 0` is dropped (loop kill). Bincode default keeps old
+    /// serialized envelopes valid.
+    #[serde(default)]
+    pub ttl: u8,
 }
+
+/// Maximum times a mesh may forward one envelope (ADR-0006).
+pub const MAX_HOPS: u8 = 16;
 
 impl Envelope {
     pub fn new(to: Port, kind: impl Into<String>, payload: Vec<u8>) -> Self {
@@ -38,6 +49,7 @@ impl Envelope {
             depends_on: None,
             kind: kind.into(),
             payload,
+            ttl: MAX_HOPS,
         }
     }
 

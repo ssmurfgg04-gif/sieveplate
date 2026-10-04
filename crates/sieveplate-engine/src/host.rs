@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
 use crate::proc_cell::ProcCellManager;
+use crate::wasm_cell::WasmCellManager;
 use sieveplate_cells::builtin_registry;
 use sieveplate_core::{
     spawn_vat, Cap, CapTable, CellError, Metrics, Port, Promises, Rights, VatCtrl, VatDeps,
@@ -32,11 +33,13 @@ use sieveplate_store::{ContentStore, EventLog, Hash};
 
 /// Cell isolation mode. `thread` (default): classic in-vat actor.
 /// `process`: a jailed OS process (seccomp + Landlock + mediated pipe).
+/// `wasm`: a Wasmtime WASI instance (ABI v1, one turn per instance).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Isolation {
     #[default]
     Thread,
     Process,
+    Wasm,
 }
 
 /// Declarative capability grant: `to` is a port path, rights are names.
@@ -122,6 +125,8 @@ pub struct Host {
     pub registry: Arc<sieveplate_core::TemplateRegistry>,
     /// Process-cell backing store (empty unless process cells exist).
     pub procs: Arc<ProcCellManager>,
+    /// WASM-cell backing store (empty unless wasm cells exist).
+    pub wasms: Arc<WasmCellManager>,
     drain_on_shutdown: bool,
     vats: Vec<(String, VatHandle)>,
 }
@@ -167,6 +172,11 @@ impl Host {
             .clone()
             .unwrap_or_else(|| std::env::current_exe().unwrap_or_else(|_| PathBuf::from("sieve")));
         let procs = Arc::new(ProcCellManager::new(Arc::clone(&store), worker_exe));
+        let wasms = Arc::new(WasmCellManager::new(
+            Arc::clone(&store),
+            &root,
+            Arc::clone(&metrics),
+        ));
 
         Ok(Host {
             host: cfg.host,
@@ -176,6 +186,7 @@ impl Host {
             metrics,
             registry,
             procs,
+            wasms,
             drain_on_shutdown: cfg.drain_on_shutdown,
             vats,
         })
@@ -190,8 +201,41 @@ impl Host {
     }
 
     /// Create a cell from a template, with capability grants.
-    /// `isolation = Process` spawns a jailed OS process instead.
+    /// `isolation = Process` spawns a jailed OS process instead;
+    /// `isolation = Wasm` instantiates a Wasmtime WASI module (template
+    /// must be `wasm:<path>` or `cas:<hash>`, ADR-0008).
     pub async fn create_cell(&self, spec: &CellSpec) -> Result<(), CellError> {
+        if spec.isolation == Isolation::Wasm {
+            let caps = spec
+                .caps
+                .iter()
+                .map(|c| {
+                    Ok(Cap {
+                        target: sieveplate_core::parse_port(&c.to, &self.host, &spec.vat)?,
+                        rights: Rights::parse(&c.rights)?,
+                    })
+                })
+                .collect::<Result<Vec<Cap>, CellError>>()?;
+            self.wasms
+                .create(
+                    &self.fabric,
+                    spec.name.clone(),
+                    spec.vat.clone(),
+                    spec.template.clone(),
+                    caps,
+                    None,
+                )
+                .await?;
+            let _ = self.log.append(
+                "cell.create",
+                vec![
+                    ("cell".into(), spec.name.clone()),
+                    ("template".into(), spec.template.clone()),
+                    ("isolation".into(), "wasm".into()),
+                ],
+            );
+            return Ok(());
+        }
         if spec.isolation == Isolation::Process {
             let caps = spec
                 .caps
@@ -258,6 +302,13 @@ impl Host {
 
     /// Destroy a cell (terminates it; content-addressed state remains).
     pub async fn destroy_cell(&self, vat: &str, name: &str) -> Result<(), CellError> {
+        if self.wasms.is_wasm_cell(vat, name) {
+            self.wasms.destroy(&self.fabric, vat, name)?;
+            let _ = self
+                .log
+                .append("cell.destroy", vec![("cell".into(), name.into())]);
+            return Ok(());
+        }
         if self.procs.is_proc_cell(vat, name) {
             self.procs.destroy(vat, name).await?;
             let _ = self
@@ -282,6 +333,14 @@ impl Host {
 
     /// Snapshot a cell now; returns the content hash.
     pub async fn snapshot_cell(&self, vat: &str, name: &str) -> Result<Hash, CellError> {
+        if self.wasms.is_wasm_cell(vat, name) {
+            let h = self.wasms.snapshot(vat, name)?;
+            let _ = self.log.append(
+                "cell.snapshot",
+                vec![("cell".into(), name.into()), ("hash".into(), h.clone())],
+            );
+            return Ok(h);
+        }
         if self.procs.is_proc_cell(vat, name) {
             let h = self.procs.snapshot(vat, name).await?;
             let _ = self.log.append(
@@ -349,8 +408,12 @@ impl Host {
 
     /// Scale a cell to zero (evict → content-addressed snapshot).
     /// For process cells this KILLS the child OS process; the next message
-    /// respawns it from the content store.
+    /// respawns it from the content store. Wasm cells are structurally at
+    /// zero between turns; this clears the live state file.
     pub async fn scale_to_zero(&self, vat: &str, name: &str) -> Result<Hash, CellError> {
+        if self.wasms.is_wasm_cell(vat, name) {
+            return self.wasms.scale_to_zero(vat, name);
+        }
         if self.procs.is_proc_cell(vat, name) {
             return self.procs.scale_to_zero(vat, name).await;
         }
@@ -368,6 +431,9 @@ impl Host {
     /// Force-wake a sleeping (or absent-but-stubbed) cell via the
     /// kernel-level `__ping`; returns wake latency in microseconds.
     pub async fn wake(&self, vat: &str, name: &str) -> Result<u64, CellError> {
+        if self.wasms.is_wasm_cell(vat, name) {
+            return self.wasms.wake(&self.fabric, vat, name).await;
+        }
         if self.procs.is_proc_cell(vat, name) {
             return self.procs.wake(&self.fabric, vat, name).await;
         }
@@ -444,6 +510,11 @@ impl Host {
         // Kill any jailed workers too: crash, not drain.
         for (vat, name, _) in self.procs.list() {
             let _ = self.procs.destroy(&vat, &name).await;
+        }
+        // Wasm cells hold no OS resources; forget them (closing their
+        // mailboxes so the blocking pumps end before runtime shutdown).
+        for (vat, name, _) in self.wasms.list() {
+            let _ = self.wasms.destroy(&self.fabric, &vat, &name);
         }
         let _ = self.log.append("host.shutdown", vec![]);
     }

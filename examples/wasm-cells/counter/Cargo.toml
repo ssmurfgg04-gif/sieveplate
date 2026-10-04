@@ -1,0 +1,16 @@
+[package]
+name = "wasm-counter-cell"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde_json = "1"
+base64 = "0.22"
+
+[profile.release]
+opt-level = "s"
+strip = true
+panic = "abort"
+
+# standalone guest: builds for wasm32-wasip1, outside the host workspace
+[workspace]

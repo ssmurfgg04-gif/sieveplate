@@ -11,14 +11,19 @@
 
 pub mod error;
 pub mod identity;
+pub mod mesh;
 mod net;
 mod router;
 pub mod secure;
 
 pub use error::FabricError;
-pub use identity::{fingerprint, HostIdentity, HostPublic, KnownPeers, PeerRecord};
+pub use identity::{
+    fingerprint, HostIdentity, HostPublic, KnownPeers, PeerRecord, RotationCore, RotationStatement,
+    IDENTITY_FORMAT, IDENTITY_VERSION,
+};
+pub use mesh::{RouteAnnounce, RouteTable, POISON};
 pub use net::{connect_peer, frame, serve, unframe, LinkConfig, Network};
-pub use router::Fabric;
+pub use router::{Fabric, KIND_ROUTES};
 pub use secure::PROTOCOL;
 
 use sieveplate_core::{CellError, Port, PromiseId, Promises};

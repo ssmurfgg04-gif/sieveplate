@@ -1,0 +1,37 @@
+# A declarative system with a WASI cell AND a native thread cell (ADR-0008).
+# Run:  sieve run -f examples/system-wasm.toml
+# See:  sieve top  -f examples/system-wasm.toml
+
+[system]
+name = "wasm-demo"
+
+[network]
+listen = "127.0.0.1:7790"
+peers = []
+
+[[cell]]
+name = "counter"
+vat = "core"
+template = "wasm:examples/cells/counter.wasm"
+isolation = "wasm"
+[[cell.caps]]
+to = "core/counter"
+rights = ["send", "call"]
+
+[[cell]]
+name = "echo"
+vat = "core"
+template = "builtin:echo"
+[[cell.caps]]
+to = "core/echo"
+rights = ["send", "call"]
+
+[[sense]]
+name = "tick"
+kind = "timer"
+period_ms = 1000
+
+[[route]]
+from = "sense:tick"
+to = "core/counter"
+name = "add"

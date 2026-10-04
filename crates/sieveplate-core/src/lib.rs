@@ -29,7 +29,7 @@ pub use cap::{Cap, CapTable, Rights};
 pub use cell::{
     BoxedCell, Cell, CellFactory, RestartPolicy, SleepPolicy, TemplateRegistry, TurnCtx, TurnRunner,
 };
-pub use envelope::{Envelope, PromiseId};
+pub use envelope::{Envelope, PromiseId, MAX_HOPS};
 pub use error::CellError;
 pub use metrics::Metrics;
 pub use port::{parse_port, Port};

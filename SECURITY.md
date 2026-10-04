@@ -43,11 +43,18 @@ See [ADR-0004](docs/adr/0004-sieve1-hybrid-pq-links.md). Every TCP link:
   down when a frame fails authentication).
 - **Trust model**: TOFU pinning with fingerprints; strict `deny_unknown`
   mode available; pinned-key change is a loud failure.
+- **Identity rotation (ADR-0007)**: the on-disk key format is FROZEN at
+  v1 (`format`/`version`/`generation`, golden test). Rotation produces a
+  statement signed by BOTH algorithms under BOTH key generations — a
+  partial quantum or classical break alone cannot forge or steer it.
+  Peers re-pin during the next handshake; replays and downgrades are
+  rejected by the generation counter; impostors without statements fail
+  loudly. `sieve identity rotate`.
 - **No plaintext transport exists.**
 
 Not yet provided: post-quantum **at-rest** encryption (see ADR-0004 §
-"Post-quantum storage note"), ML-DSA identity rotation (format not
-frozen), a general TLS replacement (SIEVE1 targets pinned fabric peers).
+"Post-quantum storage note"), a general TLS replacement (SIEVE1 targets
+pinned fabric peers).
 
 ## 4. Tamper evidence
 

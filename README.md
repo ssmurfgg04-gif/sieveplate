@@ -114,15 +114,16 @@ CAS, so `sieve rollback` is applying the previous plan.
 | Tamper-evident history | Hash-chained event log, verified on open, projected into Datalog | local log |
 | Corruption detection | CAS verify-on-read: a flipped byte on disk refuses to load | local store |
 | Versioned state | **Hearth**: content-addressed snapshots, branches, logical `diff` (branch level), byte-level `ddiff` (snapshot level, copy/insert delta with hash-verified apply) | hearth layer |
+| Multi-hop mesh | Distance-vector routing over sealed links: envelopes relay through hosts with no direct socket; poison-withdrawal on relay death, TTL loop guard, in-flight calls fail fast at ANY depth (`__fault` routed back to the caller) | `crates/sieveplate-ctl/tests/mesh.rs` |
+| WASM cells | Any `wasm32-wasip1` program as a cell: Wasmtime + WASI p1, one turn per instance, state in one preopened dir, outgoing messages capability-rechecked; scale-to-zero is structural (ADR-0008) | `crates/sieveplate-ctl/tests/wasm.rs` |
+| Identity rotation | Key format frozen at v1; rotation = statement signed by Ed25519+ML-DSA-65 under old AND new keys; peers re-pin on the next handshake; replays/downgrades rejected | `crates/sieveplate-ctl/tests/identity_rotation.rs` |
 | Searchable by meaning | Embedded Datalog over the event log | local log |
 | Reproducible systems | Closure hash = f(spec, template descriptors); content-addressed plans; rollback | declarative layer |
 
 Not guaranteed (yet): formal verification of anything beyond what seL4
 itself proves on its port target (and seL4's proofs cover the kernel, not
-this integration code); post-quantum *transport* signatures beyond the
-hybrid scheme described above (rotation/roaming of ML-DSA identities is
-designed but the identity file format is not yet frozen); multipatient
-secure multi-host routing (link-local only today).
+this integration code); post-quantum **at-rest** encryption (transport is
+hybrid-PQ, storage is not).
 
 ## Workspace
 
@@ -138,7 +139,7 @@ secure multi-host routing (link-local only today).
 | [`sieveplate-engine`](crates/sieveplate-engine) | L4 | host, cell lifecycle (create/snapshot/restore/scale-to-zero) |
 | [`sieveplate-senses`](crates/sieveplate-senses) | L1 | timer/TCP/inotify sources, real eBPF socket-filter loader |
 | [`sieveplate-sysdef`](crates/sieveplate-sysdef) | L7 | TOML spec, closure hash, plan diff, content-addressed rollback |
-| [`sieveplate-ctl`](crates/sieveplate-ctl) | — | `sieve` CLI: demo / run / apply / plan / rollback / bench / store / hearth |
+| [`sieveplate-ctl`](crates/sieveplate-ctl) | — | `sieve` CLI: demo / run / top (Catppuccin Mocha live dashboard) / apply / plan / rollback / bench / store / hearth / identity (show · rotate) |
 
 Documentation: [ARCHITECTURE.md](ARCHITECTURE.md) ·
 [PHASES.md](PHASES.md) · [BENCHMARKS.md](BENCHMARKS.md) ·

@@ -22,23 +22,45 @@ use tokio::net::{tcp::OwnedWriteHalf, TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 use crate::error::FabricError;
-use crate::identity::{HostIdentity, KnownPeers};
-use crate::router::Fabric;
+use crate::identity::{HostIdentity, KnownPeers, RotationStatement};
+use crate::router::{Fabric, PeerTx};
 use crate::secure;
 use sieveplate_core::{Envelope, Port, Route};
 
 const MAX_FRAME: u32 = 64 * 1024 * 1024;
 
-/// Link security configuration: who we are and who we trust.
+/// Link security configuration: who we are, who we trust, and (after a
+/// key rotation) the rotation statement we present to stale peers.
 #[derive(Clone)]
 pub struct LinkConfig {
     pub identity: HostIdentity,
     pub peers: Arc<KnownPeers>,
+    /// Present when this host has rotated (ADR-0007): peers still pinning
+    /// old keys verify the statement and re-pin during the handshake.
+    pub rotation: Option<RotationStatement>,
 }
 
 impl LinkConfig {
     pub fn new(identity: HostIdentity, peers: Arc<KnownPeers>) -> Self {
-        LinkConfig { identity, peers }
+        LinkConfig {
+            identity,
+            peers,
+            rotation: None,
+        }
+    }
+
+    /// Open the standard fabric directory layout:
+    /// identity + latest rotation statement + known peers.
+    pub fn open(dir: &std::path::Path, host: &str) -> Result<Self, FabricError> {
+        let identity = HostIdentity::load_or_create(dir, host)?;
+        let rotation = HostIdentity::latest_rotation(dir)
+            .filter(|stmt| stmt.core.new_generation == identity.generation);
+        let peers = Arc::new(KnownPeers::open(dir.join("known_peers.json"))?);
+        Ok(LinkConfig {
+            identity,
+            peers,
+            rotation,
+        })
     }
 }
 
@@ -121,27 +143,25 @@ impl Network {
     }
 }
 
-/// Inbound: SIEVE1 responder handshake, then hello + sealed frame pump.
-async fn inbound(
+/// Sealed-frame pump shared by inbound and outbound links.
+///
+/// Peers are keyed by their FABRIC host name (the name routes are
+/// announced under), which arrives in the first `__hello` frame. Until
+/// hello arrives the link is attached under `attach_now` (the handshake
+/// identity name / caller alias); when hello names a different fabric
+/// host the entry is moved. On ANY teardown the final name is used for
+/// crash detection, so route withdrawal hits the right entry.
+async fn pump(
     fabric: Fabric,
-    stream: TcpStream,
-    link: LinkConfig,
-    peer_addr: String,
-) -> Result<(), FabricError> {
-    let (mut rd, mut wr) = stream.into_split();
-    let channel = secure::responder(&mut rd, &mut wr, &link.identity, &link.peers).await?;
-    let peer_host = channel.peer.host.clone();
-    let (tx, rx) = mpsc::channel::<Vec<u8>>(1024);
-    let writer_task = spawn_writer(wr, rx, channel.tx);
-    fabric.track_link(writer_task);
-    fabric.attach_peer(&peer_host, tx);
-    tracing::info!(peer = %peer_host, addr = %peer_addr, "secure link established (inbound)");
-
-    // Pump sealed frames until EOF. ANY teardown (clean EOF, tamper,
-    // error) counts as a peer crash: in-flight calls fail fast.
-    let mut sec_rx = channel.rx;
+    mut rd: tokio::net::tcp::OwnedReadHalf,
+    mut sec_rx: secure::SecureRx,
+    tx: PeerTx,
+    attach_now: String,
+) {
+    fabric.attach_peer(&attach_now, tx.clone());
+    let mut peer_name = attach_now;
     let mut raw = [0u8; 4];
-    let result = loop {
+    loop {
         let read_res = async {
             rd.read_exact(&mut raw).await?;
             let len = u32::from_be_bytes(raw) as usize;
@@ -150,21 +170,93 @@ async fn inbound(
             }
             let mut sealed = vec![0u8; len];
             rd.read_exact(&mut sealed).await?;
-            let plain = sec_rx.open(&sealed)?;
-            Ok(plain)
+            sec_rx.open(&sealed)
         }
         .await;
-        match read_res {
-            Ok(plain) => {
-                if dispatch_plain(&fabric, &plain, &peer_host).await.is_err() {
-                    break Err(FabricError::Codec("dispatch failed".into()));
+        let plain = match read_res {
+            Ok(p) => p,
+            Err(_) => break, // EOF/IO error: link down
+        };
+        match unframe(&plain) {
+            Ok(Some((env, _))) => {
+                if env.kind == "__hello" {
+                    // The remote's FABRIC name — routes are announced under
+                    // it. Re-key the peer entry when it differs from the
+                    // provisional attach name.
+                    if let Ok(name) = String::from_utf8(env.payload) {
+                        if !name.is_empty() && name != peer_name {
+                            fabric.drop_peer(&peer_name);
+                            fabric.attach_peer(&name, tx.clone());
+                            peer_name = name;
+                        }
+                    }
+                    continue;
+                }
+                if env.kind == crate::router::KIND_ROUTES {
+                    match serde_json::from_slice::<crate::mesh::RouteAnnounce>(&env.payload) {
+                        Ok(ann) => fabric.mesh_receive(&ann),
+                        Err(e) => tracing::warn!(
+                            error = %e,
+                            peer = %peer_name,
+                            "bad route announcement"
+                        ),
+                    }
+                    continue;
+                }
+                if let Err(e) = fabric.deliver(env).await {
+                    tracing::warn!(
+                        error = %e,
+                        peer = %peer_name,
+                        "inbound envelope delivery failed"
+                    );
                 }
             }
-            Err(e) => break Err(e),
+            Ok(None) => {
+                // Clean EOF or protocol error: same treatment either way.
+            }
+            Err(e) => {
+                // Replay/tamper: kill the link rather than risk state.
+                tracing::warn!(error = %e, peer = %peer_name, "sealed frame rejected; closing link");
+            }
         }
-    };
-    fabric.peer_disconnected(&peer_host);
-    result
+    }
+    // Link down (EOF/tamper/error): treat as peer crash under the name the
+    // rest of the mesh knows us to route by.
+    fabric.peer_disconnected(&peer_name);
+}
+
+/// Inbound: SIEVE1 responder handshake, then hello + sealed frame pump.
+async fn inbound(
+    fabric: Fabric,
+    stream: TcpStream,
+    link: LinkConfig,
+    peer_addr: String,
+) -> Result<(), FabricError> {
+    let (mut rd, mut wr) = stream.into_split();
+    let channel = secure::responder(
+        &mut rd,
+        &mut wr,
+        &link.identity,
+        &link.peers,
+        link.rotation.as_ref(),
+    )
+    .await?;
+    let id_host = channel.peer.host.clone(); // authenticator name (pinning)
+    let (tx, rx) = mpsc::channel::<Vec<u8>>(1024);
+    let writer_task = spawn_writer(wr, rx, channel.tx);
+    fabric.track_link(writer_task);
+    tracing::info!(peer = %id_host, addr = %peer_addr, "secure link established (inbound)");
+
+    // Announce ourselves INSIDE the encrypted channel (fabric name).
+    let hello = Envelope::new(
+        Port::new("", "", ""),
+        "__hello",
+        fabric.host().to_string().into_bytes(),
+    );
+    let _ = tx.send(frame(&hello)?).await;
+
+    pump(fabric, rd, channel.rx, tx, id_host).await;
+    Ok(())
 }
 
 /// Outbound: SIEVE1 initiator handshake, then attach + pump.
@@ -177,14 +269,22 @@ pub async fn connect_peer(
     let alias = alias.to_string(); // owned: the reader task outlives this call
     let stream = TcpStream::connect(addr).await?;
     let (mut rd, mut wr) = stream.into_split();
-    let channel = secure::initiator(&mut rd, &mut wr, &link.identity, &link.peers, &alias).await?;
+    let channel = secure::initiator(
+        &mut rd,
+        &mut wr,
+        &link.identity,
+        &link.peers,
+        &alias,
+        link.rotation.as_ref(),
+    )
+    .await?;
     let (tx, rx) = mpsc::channel::<Vec<u8>>(1024);
     let writer_task = spawn_writer(wr, rx, channel.tx);
     fabric.track_link(writer_task);
-    fabric.attach_peer(&alias, tx.clone());
     tracing::info!(peer = %alias, "secure link established (outbound)");
 
-    // Announce ourselves INSIDE the encrypted channel (legacy hello).
+    // Announce ourselves INSIDE the encrypted channel (fabric name). The
+    // pump attaches the link under the remote's announced fabric name.
     let hello = Envelope::new(
         Port::new("", "", ""),
         "__hello",
@@ -192,57 +292,12 @@ pub async fn connect_peer(
     );
     let _ = tx.send(frame(&hello)?).await;
 
-    let fabric2 = fabric.clone();
-    let mut sec_rx = channel.rx;
-    let reader = tokio::spawn(async move {
-        let mut raw = [0u8; 4];
-        loop {
-            if rd.read_exact(&mut raw).await.is_err() {
-                break;
-            }
-            let len = u32::from_be_bytes(raw) as usize;
-            if len > MAX_FRAME as usize {
-                tracing::warn!(len, "sealed frame too large; closing link");
-                break;
-            }
-            let mut sealed = vec![0u8; len];
-            if rd.read_exact(&mut sealed).await.is_err() {
-                break;
-            }
-            match sec_rx.open(&sealed) {
-                Ok(plain) => {
-                    if dispatch_plain(&fabric2, &plain, &alias).await.is_err() {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    // Replay/tamper: kill the link rather than risk state.
-                    tracing::warn!(error = %e, "sealed frame rejected; closing link");
-                    break;
-                }
-            }
-        }
-        // Link down (EOF/tamper/error): treat as peer crash.
-        fabric2.peer_disconnected(&alias);
-    });
+    // Attach synchronously (alias) so callers can send immediately; the
+    // pump re-keys the entry to the remote's announced fabric name.
+    fabric.attach_peer(&alias, tx.clone());
+    let reader = tokio::spawn(pump(fabric.clone(), rd, channel.rx, tx, alias));
     fabric.track_link(reader);
     Ok(())
-}
-
-/// Decode one inner framed envelope and hand it to the fabric.
-async fn dispatch_plain(fabric: &Fabric, plain: &[u8], peer: &str) -> Result<(), FabricError> {
-    match unframe(plain)? {
-        Some((env, _)) => {
-            if env.kind == "__hello" {
-                return Ok(()); // identity already established by SIEVE1
-            }
-            if let Err(e) = fabric.deliver(env).await {
-                tracing::warn!(error = %e, peer = %peer, "inbound envelope delivery failed");
-            }
-            Ok(())
-        }
-        None => Err(FabricError::Codec("truncated inner frame".into())),
-    }
 }
 
 /// Writer half: seals payloads and writes `len | sealed` to the socket.

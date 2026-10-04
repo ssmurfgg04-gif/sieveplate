@@ -142,7 +142,11 @@ sieve rollback --root ./runtime                          # apply previous plan
 | Failure containment | promise failure on rollback; peer-crash detection fails in-flight calls fast; process-cell respawn from CAS |
 | Versioning | **Hearth layer**: content-addressed snapshots, branches + reflog, logical `diff` (branch level), byte-level `ddiff` (snapshot level) — `sieve hearth ...` |
 | Performance | honest benchmarks: every row states what it measures and what it does NOT (BENCHMARKS.md); new jail + handshake suites measure real isolation/crypto costs |
-| Documentation | README, ARCHITECTURE, PHASES (this file), BENCHMARKS, SECURITY, ADR-0001..0005 (platform matrix, capability bridge, PQ policy) |
+| Documentation | README, ARCHITECTURE, PHASES (this file), BENCHMARKS, SECURITY, ADR-0001..0008 (platform matrix, capability bridge, PQ policy, mesh, rotation, wasm) |
+| Multi-hop mesh | **Distance-vector routing** over sealed links (ADR-0006): envelopes relay through hosts with no direct socket; poison-response withdrawal on relay death; per-envelope TTL; `__fault` propagation fails in-flight calls fast at ANY mesh depth | `cargo test -p sieveplate-ctl --test mesh` |
+| WASM cells | **Wasmtime/WASI template kind** (ADR-0008): any `wasm32-wasip1` binary is a cell (frozen SIEVE-WASI ABI v1, `docs/wasm-abi.md`); one turn = one instance; structural scale-to-zero | `cargo test -p sieveplate-ctl --test wasm` |
+| Identity rotation | **Key format FROZEN v1 + ML-DSA rotation** (ADR-0007): 4-signature crossover statements, generation counters, in-handshake re-pinning, replay/downgrade rejection | `cargo test -p sieveplate-ctl --test identity_rotation` + `sieve identity rotate` |
+| Live dashboard | **`sieve top`**: Catppuccin Mocha TUI (identity, cells by isolation, mesh routes, hearth branches, store integrity, latency percentiles); headless `--screenshot` renders a frame as JSON for CI visual review | `cargo run -p sieveplate-ctl -- top -f examples/system-wasm.toml --root ./rt --screenshot /tmp/top.json --seed-hearth` |
 | Community | Apache-2.0, CONTRIBUTING.md, CI: fmt + clippy -D warnings + tests + jail/adversarial + **eBPF load as root** + **seL4 build & QEMU boot smoke** + **nix flake check** |
 
 ---

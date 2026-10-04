@@ -61,3 +61,8 @@ libc               = "0.2"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Dev builds carry no debug info: the wasmtime dependency makes debug
+# objects enormous (and slow to link) for no benefit in CI/test runs.
+[profile.dev]
+debug = 0

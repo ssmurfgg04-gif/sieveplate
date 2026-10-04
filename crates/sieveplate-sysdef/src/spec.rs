@@ -198,9 +198,12 @@ impl SystemSpec {
                     c.name
                 )));
             }
-            if !c.template.starts_with("builtin:") && !c.template.starts_with("cas:") {
+            if !c.template.starts_with("builtin:")
+                && !c.template.starts_with("cas:")
+                && !c.template.starts_with("wasm:")
+            {
                 return Err(SpecError::Validation(format!(
-                    "cell '{}' template '{}' must start with builtin: or cas:",
+                    "cell '{}' template '{}' must start with builtin:, cas: or wasm:",
                     c.name, c.template
                 )));
             }

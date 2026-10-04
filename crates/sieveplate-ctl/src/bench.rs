@@ -269,8 +269,8 @@ pub async fn run(suite: &str) -> Result<()> {
             let (mut r_rd, mut r_wr) = tokio::io::split(s2c);
             let t = Instant::now();
             let (ri, rr) = tokio::join!(
-                sieveplate_fabric::secure::initiator(&mut i_rd, &mut i_wr, &a, &peers_a, "b"),
-                sieveplate_fabric::secure::responder(&mut r_rd, &mut r_wr, &b, &peers_b),
+                sieveplate_fabric::secure::initiator(&mut i_rd, &mut i_wr, &a, &peers_a, "b", None),
+                sieveplate_fabric::secure::responder(&mut r_rd, &mut r_wr, &b, &peers_b, None),
             );
             ri?;
             rr?;

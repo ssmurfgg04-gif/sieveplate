@@ -45,7 +45,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::error::FabricError;
-use crate::identity::{HostIdentity, HostPublic, KnownPeers};
+use crate::identity::{HostIdentity, HostPublic, KnownPeers, RotationStatement};
 use ml_kem::KeyExport as _;
 
 pub const PROTOCOL: &str = "sieve1-hybrid";
@@ -181,11 +181,18 @@ enum HsFrame {
         pq_ct: Vec<u8>,
         ed_sig: Vec<u8>,
         pq_sig: Vec<u8>,
+        /// Present when the responder has rotated keys and its pin may be
+        /// stale on the initiator (ADR-0007). Transcript-bound.
+        #[serde(default)]
+        rotation: Option<RotationStatement>,
     },
     ClientAuth {
         public: HostPublic,
         ed_sig: Vec<u8>,
         pq_sig: Vec<u8>,
+        /// Present when the initiator has rotated keys (ADR-0007).
+        #[serde(default)]
+        rotation: Option<RotationStatement>,
     },
     Ready,
     Abort {
@@ -294,6 +301,7 @@ pub async fn initiator<R, W>(
     identity: &HostIdentity,
     peers: &KnownPeers,
     expected_host: &str,
+    rotation: Option<&RotationStatement>,
 ) -> Result<SecureChannel, FabricError>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -319,19 +327,21 @@ where
         HsFrame::Abort { why } => return Err(FabricError::Handshake(why)),
         _ => return Err(FabricError::Handshake("expected ServerHello".into())),
     };
-    let (public, sh_eph_x, pq_ct, ed_sig, pq_sig) = match &sh {
+    let (public, sh_eph_x, pq_ct, ed_sig, pq_sig, sh_rotation) = match &sh {
         HsFrame::ServerHello {
             public,
             eph_x,
             pq_ct,
             ed_sig,
             pq_sig,
+            rotation,
         } => (
             public.clone(),
             *eph_x,
             pq_ct.clone(),
             ed_sig.clone(),
             pq_sig.clone(),
+            rotation.clone(),
         ),
         _ => unreachable!(),
     };
@@ -342,18 +352,28 @@ where
         )));
     }
     // Transcript absorbs the canonical (empty-sig) form on BOTH sides.
+    // The rotation statement IS part of the transcript (it authenticates
+    // the keys being claimed) but the frame's own signatures are not.
     let sh_canon = hs_bytes(&HsFrame::ServerHello {
         public: public.clone(),
         eph_x: sh_eph_x,
         pq_ct: pq_ct.clone(),
         ed_sig: Vec::new(),
         pq_sig: Vec::new(),
+        rotation: sh_rotation.clone(),
     });
     tr.absorb(&sh_canon);
     let th1 = tr.hash();
     let mut auth_msg = b"server-auth".to_vec();
     auth_msg.extend_from_slice(&th1);
-    peers.verify_and_pin(&public, &auth_msg, &ed_sig, &pq_sig, "")?;
+    peers.verify_and_pin(
+        &public,
+        &auth_msg,
+        &ed_sig,
+        &pq_sig,
+        "",
+        sh_rotation.as_ref(),
+    )?;
 
     // ---- 3. Derive: hybrid X25519 + ML-KEM decapsulation ---------------
     let their_eph = x25519_dalek::PublicKey::from(sh_eph_x);
@@ -381,6 +401,7 @@ where
         public: identity.public(),
         ed_sig: Vec::new(),
         pq_sig: Vec::new(),
+        rotation: rotation.cloned(),
     });
     tr.absorb(&ca_canon);
     let th2 = tr.hash();
@@ -391,6 +412,7 @@ where
             public: identity.public(),
             ed_sig: ed2,
             pq_sig: pq2,
+            rotation: rotation.cloned(),
         },
     )
     .await?;
@@ -412,6 +434,7 @@ pub async fn responder<R, W>(
     wr: &mut W,
     identity: &HostIdentity,
     peers: &KnownPeers,
+    rotation: Option<&RotationStatement>,
 ) -> Result<SecureChannel, FabricError>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -463,6 +486,7 @@ where
         pq_ct: pq_ct.as_slice().to_vec(),
         ed_sig: Vec::new(),
         pq_sig: Vec::new(),
+        rotation: rotation.cloned(),
     });
     tr.absorb(&sh_canon);
     let th1 = tr.hash();
@@ -475,6 +499,7 @@ where
             pq_ct: pq_ct.as_slice().to_vec(),
             ed_sig: ed_sig.clone(),
             pq_sig: pq_sig.clone(),
+            rotation: rotation.cloned(),
         },
     )
     .await?;
@@ -485,23 +510,30 @@ where
         HsFrame::Abort { why } => return Err(FabricError::Handshake(why)),
         _ => return Err(FabricError::Handshake("expected ClientAuth".into())),
     };
-    let (public, ed2, pq2) = match &ca {
+    let (public, ed2, pq2, ca_rotation) = match &ca {
         HsFrame::ClientAuth {
             public,
             ed_sig,
             pq_sig,
-        } => (public.clone(), ed_sig.clone(), pq_sig.clone()),
+            rotation,
+        } => (
+            public.clone(),
+            ed_sig.clone(),
+            pq_sig.clone(),
+            rotation.clone(),
+        ),
         _ => unreachable!(),
     };
     tr.absorb(&hs_bytes(&HsFrame::ClientAuth {
         public: public.clone(),
         ed_sig: Vec::new(),
         pq_sig: Vec::new(),
+        rotation: ca_rotation.clone(),
     }));
     let th2 = tr.hash();
     let mut auth_msg = b"client-auth".to_vec();
     auth_msg.extend_from_slice(&th2);
-    peers.verify_and_pin(&public, &auth_msg, &ed2, &pq2, "")?;
+    peers.verify_and_pin(&public, &auth_msg, &ed2, &pq2, "", ca_rotation.as_ref())?;
     write_hs(wr, &HsFrame::Ready).await?;
 
     // ---- 4. Derive --------------------------------------------------------
@@ -550,8 +582,8 @@ mod tests {
         let (mut i_rd, mut i_wr) = tokio::io::split(c2s);
         let (mut r_rd, mut r_wr) = tokio::io::split(s2c);
         let (i_ch, r_ch) = tokio::join!(
-            initiator(&mut i_rd, &mut i_wr, a, &peers_i, "beta"),
-            responder(&mut r_rd, &mut r_wr, b, &peers_r),
+            initiator(&mut i_rd, &mut i_wr, a, &peers_i, "beta", None),
+            responder(&mut r_rd, &mut r_wr, b, &peers_r, None),
         );
         (i_ch.unwrap(), r_ch.unwrap())
     }
@@ -616,7 +648,7 @@ mod tests {
             .encode()
             .to_vec();
         peers_i
-            .verify_and_pin(&b.public(), pin_msg, &ed, &pq, "")
+            .verify_and_pin(&b.public(), pin_msg, &ed, &pq, "", None)
             .unwrap();
 
         let (c2s, s2c) = duplex(1 << 20);
@@ -624,8 +656,14 @@ mod tests {
         let (mut r_rd, mut r_wr) = tokio::io::split(s2c);
         let d = std::time::Duration::from_secs(20);
         let (res_i, res_r) = tokio::join!(
-            tokio::time::timeout(d, initiator(&mut i_rd, &mut i_wr, &a, &peers_i, "beta")),
-            tokio::time::timeout(d, responder(&mut r_rd, &mut r_wr, &impostor, &peers_r)),
+            tokio::time::timeout(
+                d,
+                initiator(&mut i_rd, &mut i_wr, &a, &peers_i, "beta", None)
+            ),
+            tokio::time::timeout(
+                d,
+                responder(&mut r_rd, &mut r_wr, &impostor, &peers_r, None)
+            ),
         );
         // The initiator MUST reject the impostor; the responder may run to
         // its timeout or error out when the initiator drops the link.
@@ -650,8 +688,11 @@ mod tests {
         let (mut r_rd, mut r_wr) = tokio::io::split(s2c);
         let d = std::time::Duration::from_secs(20);
         let (res_i, res_r) = tokio::join!(
-            tokio::time::timeout(d, initiator(&mut i_rd, &mut i_wr, &a, &peers_i, "beta")),
-            tokio::time::timeout(d, responder(&mut r_rd, &mut r_wr, &b, &peers_r)),
+            tokio::time::timeout(
+                d,
+                initiator(&mut i_rd, &mut i_wr, &a, &peers_i, "beta", None)
+            ),
+            tokio::time::timeout(d, responder(&mut r_rd, &mut r_wr, &b, &peers_r, None)),
         );
         assert!(
             res_i.is_err() || matches!(res_i, Ok(Err(_))),

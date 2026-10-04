@@ -98,23 +98,32 @@ pub fn status(root: &str) -> Result<()> {
 }
 
 /// Execute a declarative system until Ctrl-C.
-pub async fn run_file(file: &str, root: &str) -> Result<()> {
-    let spec = read_spec(file)?;
+/// A booted system: everything `sieve run` sets up, held for teardown.
+pub struct Booted {
+    pub host: Host,
+    pub sense_handles: Vec<tokio::task::JoinHandle<()>>,
+    pub pump_handle: tokio::task::JoinHandle<()>,
+    pub network: Option<sieveplate_fabric::Network>,
+}
 
-    // Record the plan first (apply semantics).
-    {
-        let reg = registry();
-        let plan = Plan::from_spec(&spec, |t| reg.descriptor(t))
-            .map_err(|e| anyhow!("plan error: {e}"))?;
-        let store = PlanStore::open(root)?;
-        let h = store.record(&plan)?;
-        println!("✓ applied closure {} (plan {h})", plan.closure);
+/// Tear a booted system down cleanly.
+pub async fn teardown(b: Booted) {
+    for h in b.sense_handles {
+        h.abort();
     }
+    b.pump_handle.abort();
+    if let Some(n) = b.network {
+        n.shutdown();
+    }
+    b.host.shutdown().await;
+}
 
+/// Boot the declarative spec: host + cells + secure links + senses + pump.
+pub async fn boot_from_spec(spec: &SystemSpec, root: &str) -> Result<Booted> {
     let host = Host::start(
         HostConfig {
             host: spec.system.name.clone(),
-            vats: dedup_vats(&spec),
+            vats: dedup_vats(spec),
             mailbox_capacity: 1024,
             worker_exe: None,
             drain_on_shutdown: true,
@@ -141,39 +150,33 @@ pub async fn run_file(file: &str, root: &str) -> Result<()> {
             max_restarts: c.max_restarts,
             isolation: match c.isolation.as_deref() {
                 Some("process") => sieveplate_engine::Isolation::Process,
+                Some("wasm") => sieveplate_engine::Isolation::Wasm,
                 _ => sieveplate_engine::Isolation::Thread,
             },
             sandbox: c.sandbox.clone().unwrap_or_default(),
         };
         host.create_cell(&cs).await?;
-        println!("✓ cell {}/{} <{}>", c.vat, c.name, c.template);
     }
 
-    // Network (Phase 4) if configured. Links are always secured (SIEVE1:
-    // hybrid Ed25519+ML-DSA identity, X25519+ML-KEM-768 keys, AEAD frames).
+    // Network (Phase 4) if configured. Links are always secured (SIEVE1).
     let mut network = None;
     if let Some(net) = &spec.network {
-        let link = {
-            let dir = std::path::Path::new(root).join("fabric");
-            let identity = sieveplate_fabric::HostIdentity::load_or_create(&dir, &host.host)?;
-            let peers = std::sync::Arc::new(sieveplate_fabric::KnownPeers::open(
-                dir.join("known_peers.json"),
-            )?);
-            sieveplate_fabric::LinkConfig::new(identity, peers)
-        };
+        // Standard fabric dir: identity + latest rotation statement (ADR-0007)
+        // + known peers.
+        let link = sieveplate_fabric::LinkConfig::open(
+            std::path::Path::new(root).join("fabric").as_path(),
+            &host.host,
+        )?;
         if let Some(listen) = &net.listen {
             network =
                 Some(sieveplate_fabric::serve(host.fabric.clone(), listen, link.clone()).await?);
-            println!("✓ listening on {listen} (secure link)");
         }
         for peer in &net.peers {
-            // peers are "alias=addr"
             let (alias, addr) = match peer.split_once('=') {
                 Some(x) => x,
                 None => return Err(anyhow!("peer '{peer}' must be alias=addr")),
             };
             sieveplate_fabric::connect_peer(&host.fabric, alias, addr, &link).await?;
-            println!("✓ peer {alias} @ {addr} (secure link)");
         }
     }
 
@@ -199,7 +202,6 @@ pub async fn run_file(file: &str, root: &str) -> Result<()> {
             )),
             other => return Err(anyhow!("unknown sense kind '{other}'")),
         }
-        println!("✓ sense {} (kind={})", s.name, s.kind);
     }
     drop(tx);
 
@@ -219,9 +221,6 @@ pub async fn run_file(file: &str, root: &str) -> Result<()> {
             })
         })
         .collect();
-    for r in &routes {
-        println!("✓ route sense:{} → {}", r.sense_name, r.target);
-    }
 
     let pump = SensePump::new(
         rx,
@@ -231,19 +230,44 @@ pub async fn run_file(file: &str, root: &str) -> Result<()> {
     );
     let pump_handle = tokio::spawn(pump.run());
 
-    println!("\n\x1b[1mSieveplate running — Ctrl-C to stop\x1b[0m");
+    Ok(Booted {
+        host,
+        sense_handles: handles,
+        pump_handle,
+        network,
+    })
+}
+
+pub async fn run_file(file: &str, root: &str) -> Result<()> {
+    let spec = read_spec(file)?;
+
+    // Record the plan first (apply semantics).
+    {
+        let reg = registry();
+        let plan = Plan::from_spec(&spec, |t| reg.descriptor(t))
+            .map_err(|e| anyhow!("plan error: {e}"))?;
+        let store = PlanStore::open(root)?;
+        let h = store.record(&plan)?;
+        println!("\u{2713} applied closure {} (plan {h})", plan.closure);
+    }
+
+    let booted = boot_from_spec(&spec, root).await?;
+    for c in &spec.cells {
+        println!("\u{2713} cell {}/{} <{}>", c.vat, c.name, c.template);
+    }
+    if let Some(n) = &booted.network {
+        println!("\u{2713} listening on {} (secure link)", n.local_addr);
+    }
+    for s in &spec.senses {
+        println!("\u{2713} sense {} (kind={})", s.name, s.kind);
+    }
+
+    println!("Sieveplate running \u{2014} Ctrl-C to stop");
     tokio::signal::ctrl_c().await?;
 
-    println!("\nshutting down…");
-    for h in handles {
-        h.abort();
-    }
-    pump_handle.abort();
-    if let Some(n) = network {
-        n.shutdown();
-    }
-    host.shutdown().await;
-    println!("✓ clean shutdown (state persisted, rollback available)");
+    println!("shutting down\u{2026}");
+    teardown(booted).await;
+    println!("\u{2713} clean shutdown (state persisted, rollback available)");
     Ok(())
 }
 

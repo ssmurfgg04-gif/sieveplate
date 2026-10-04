@@ -304,6 +304,7 @@ impl Vat {
                         depends_on: None,
                         kind: Envelope::KIND_REPLY.into(),
                         payload: reply.clone().unwrap_or_default(),
+                        ttl: crate::MAX_HOPS,
                     };
                     let _ = self.fabric.deliver(rep).await;
                 }
@@ -681,6 +682,7 @@ impl Vat {
             depends_on: None,
             kind: Envelope::KIND_REPLY.into(),
             payload: b"pong".to_vec(),
+            ttl: crate::MAX_HOPS,
         };
         let _ = self.fabric.deliver(reply).await;
     }
